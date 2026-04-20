@@ -1,0 +1,16 @@
+# Compiled binaries
+test_rvv
+*.o
+*.elf
+
+# Build outputs
+build/
+out/
+
+# Raw image files
+*.raw
+*.bin
+
+# Editor artifacts
+*.swp
+*~

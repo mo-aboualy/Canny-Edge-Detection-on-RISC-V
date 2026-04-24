@@ -1,3 +1,4 @@
+VLEN ?= 128
 HOST_CXX = g++
 RV_CXX = riscv64-unknown-elf-g++
 
@@ -19,7 +20,7 @@ canny_rv:
 	$(RV_CXX) $(RV_FLAGS) src/main.cpp -o $(BUILD_DIR_RV)/canny_rv
 
 run: canny_rv
-	qemu-riscv64 -cpu rv64,v=true,vlen=128 ./$(BUILD_DIR_RV)/canny_rv
+	qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) ./$(BUILD_DIR_RV)/canny_rv
 
 clean:
 	rm -rf build/*

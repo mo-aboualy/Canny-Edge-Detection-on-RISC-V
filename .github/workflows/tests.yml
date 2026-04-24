@@ -1,0 +1,17 @@
+name: Host Tests CI
+
+on: [push, pull_request]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+
+    - name: Install GoogleTest
+      run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+
+    - name: Compile and Run Tests
+      run: make test

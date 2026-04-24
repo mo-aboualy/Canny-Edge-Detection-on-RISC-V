@@ -1,15 +1,18 @@
-#ifndef IMAGE_IO_H
-#define IMAGE_IO_H
+#pragma once
 
 #include <cstdint>
-#include <cstddef>
+#include <vector>
 
-// Loads a raw grayscale image.
-// Returns a pointer to the aligned memory buffer, or nullptr if it fails.
-uint8_t* load_raw_image(const char* filename, size_t width, size_t height);
+struct Image {
+    uint32_t width;
+    uint32_t height;
+    std::vector<uint8_t> pixels; // row-major, 1 byte per pixel
+};
 
-// Saves a raw grayscale image buffer to a file.
-void save_raw_image(const char* filename, const uint8_t* data, size_t width, size_t height);
+// Read a raw grayscale image: a plain binary file of exactly width*height bytes.
+// Returns true on success, false if the file cannot be opened or is the wrong size.
+bool image_read(const char* path, uint32_t width, uint32_t height, Image& out);
 
-#endif
-
+// Write a raw grayscale image: width*height bytes, no header.
+// Returns true on success, false if the file cannot be written.
+bool image_write(const char* path, const Image& img);

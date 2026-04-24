@@ -1,51 +1,39 @@
 #include "image_io.h"
+
 #include <cstdio>
-#include <cstdlib>
-#include <iostream>
 
-uint8_t* load_raw_image(const char* filename, size_t width, size_t height) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        std::cerr << "Error: Could not open file " << filename << " for reading.\n";
-        return nullptr;
+bool image_read(const char* path, uint32_t width, uint32_t height, Image& out) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        return false;
     }
 
-    size_t size = width * height;
-    
-    // C++ aligned_alloc requires the size to be a multiple of the alignment (64).
-    // This bitwise math rounds the size up to the nearest multiple of 64.
-    size_t alloc_size = (size + 63) & ~63; 
-    
-    // Allocate 64-byte aligned memory as required by the hints guide
-    uint8_t* buffer = static_cast<uint8_t*>(aligned_alloc(64, alloc_size));
+    size_t expected = (size_t)width * height;
 
-    if (!buffer) {
-        std::cerr << "Error: Memory allocation failed.\n";
-        fclose(file);
-        return nullptr;
+    out.width  = width;
+    out.height = height;
+    out.pixels.resize(expected);
+
+    size_t n = fread(out.pixels.data(), 1, expected, f);
+    fclose(f);
+
+    if (n != expected) {
+        out.pixels.clear();
+        return false;
     }
 
-    size_t bytes_read = fread(buffer, 1, size, file);
-    if (bytes_read != size) {
-        std::cerr << "Warning: Read " << bytes_read << " bytes, expected " << size << ".\n";
-    }
-
-    fclose(file);
-    return buffer;
+    return true;
 }
 
-void save_raw_image(const char* filename, const uint8_t* data, size_t width, size_t height) {
-    FILE* file = fopen(filename, "wb");
-    if (!file) {
-        std::cerr << "Error: Could not open file " << filename << " for writing.\n";
-        return;
+bool image_write(const char* path, const Image& img) {
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        return false;
     }
 
-    size_t size = width * height;
-    size_t bytes_written = fwrite(data, 1, size, file);
-    if (bytes_written != size) {
-        std::cerr << "Warning: Wrote " << bytes_written << " bytes, expected " << size << ".\n";
-    }
+    size_t expected = (size_t)img.width * img.height;
+    size_t n = fwrite(img.pixels.data(), 1, expected, f);
+    fclose(f);
 
-    fclose(file);
+    return n == expected;
 }

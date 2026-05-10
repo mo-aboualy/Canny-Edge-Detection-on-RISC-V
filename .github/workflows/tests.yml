@@ -7,11 +7,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Check out code
-      uses: actions/checkout@v4
+      - name: Check out code
+        uses: actions/checkout@v4
 
-    - name: Install GoogleTest
-      run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev doxygen
 
-    - name: Compile and Run Tests
-      run: make test
+      - name: Compile and Run Tests
+        run: make test
+
+      - name: Generate Doxygen Documentation
+        run: doxygen Doxyfile
+
+      - name: Upload Documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: doxygen-docs
+          path: docs/html/

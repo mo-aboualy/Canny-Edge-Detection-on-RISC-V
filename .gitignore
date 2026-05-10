@@ -14,3 +14,12 @@ out/
 # Editor artifacts
 *.swp
 *~
+
+# Generated Doxygen documentation
+docs/
+
+# Test binaries
+test_blur
+test_sobel
+verify_io
+test_rvv_bin

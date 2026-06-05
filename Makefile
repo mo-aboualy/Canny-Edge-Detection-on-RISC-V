@@ -12,7 +12,7 @@ all: test canny_rv
 
 test: 
 	mkdir -p $(BUILD_DIR_HOST)
-	$(HOST_CXX) $(HOST_FLAGS) src/host_tests.cpp src/magnitude.cpp src/direction.cpp -o $(BUILD_DIR_HOST)/test_runner -lgtest -lgtest_main -pthread
+	$(HOST_CXX) $(HOST_FLAGS) src/host_tests.cpp src/image_io.cpp src/gaussian_blur.cpp src/sobel.cpp src/magnitude.cpp src/direction.cpp -o $(BUILD_DIR_HOST)/test_runner -lgtest -lgtest_main -pthread
 	./$(BUILD_DIR_HOST)/test_runner
 
 canny_rv:

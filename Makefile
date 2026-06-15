@@ -1,27 +1,20 @@
-VLEN ?= 128
-HOST_CXX = g++
-RV_CXX = riscv64-unknown-elf-g++
+RV_CXX      = riscv64-unknown-elf-g++
+RV_CXXFLAGS = -O3 -march=rv64gcv -std=c++17
 
-HOST_FLAGS = -Wall -Wextra -O2 -Iinclude
-RV_FLAGS = -Wall -Wextra -O2 -Iinclude -march=rv64gcv 
+QEMU        = qemu-riscv64
+VLEN_128    = 128
+IMG_WIDTH   = 100
+IMG_HEIGHT  = 75
 
-BUILD_DIR_HOST = build/host
-BUILD_DIR_RV = build/rv
+all: profile_rv
 
-all: test canny_rv
+profile_rv: profile_pipeline.cpp
+	$(RV_CXX) $(RV_CXXFLAGS) profile_pipeline.cpp -o profile_rv
 
-test: 
-	mkdir -p $(BUILD_DIR_HOST)
-	$(HOST_CXX) $(HOST_FLAGS) src/host_tests.cpp src/image_io.cpp src/gaussian_blur.cpp src/sobel.cpp src/magnitude.cpp src/direction.cpp -o $(BUILD_DIR_HOST)/test_runner -lgtest -lgtest_main -pthread
-	./$(BUILD_DIR_HOST)/test_runner
-
-canny_rv:
-	mkdir -p $(BUILD_DIR_RV)
-	$(RV_CXX) $(RV_FLAGS) src/main.cpp -o $(BUILD_DIR_RV)/canny_rv
-
-run: canny_rv
-	qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) ./$(BUILD_DIR_RV)/canny_rv
+run_profile: profile_rv
+	$(QEMU) -cpu rv64,v=true,vlen=$(VLEN_128) ./profile_rv $(IMG_WIDTH) $(IMG_HEIGHT)
 
 clean:
-	rm -rf build/*
+	rm -f profile_rv
 
+.PHONY: all run_profile clean

@@ -1,23 +1,22 @@
 #ifndef GAUSSIAN_BLUR_H
 #define GAUSSIAN_BLUR_H
-
 #include "image_io.h"
+#include <cstdlib>
+#include <string.h>
 
 /**
- * @file gaussian_blur.h
- * @brief 5x5 Gaussian Blur for grayscale raw images.
- */
-
-/**
- * @brief Applies a 5x5 Gaussian Blur to the input image.
- *
- * Reduces noise before gradient computation.
- * Output buffer must be pre-allocated with the same dimensions as input.
- * Memory must be 64-byte aligned for future RVV vectorization.
- *
- * @param in  Source grayscale image.
- * @param out Destination image (pre-allocated, same dimensions as in).
+ * @brief Version 1: Gaussian Blur WITH boundary check inside kernel loop.
+ * The if-statement prevents compiler auto-vectorization.
+ * Expected vec_report: "not vectorized: control flow in loop"
  */
 void gaussian_blur_5x5(const Image& in, Image& out);
+
+/**
+ * @brief Version 2: Gaussian Blur WITH pre-padding, NO boundary check.
+ * Branch-free inner loop allows compiler to attempt vectorization.
+ * Expected vec_report: "not vectorized: complicated access pattern"
+ * Proves manual RVV intrinsics are needed for Phase 5.
+ */
+void gaussian_blur_padded(const Image& in, Image& out);
 
 #endif // GAUSSIAN_BLUR_H

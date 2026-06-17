@@ -23,3 +23,11 @@ test_blur
 test_sobel
 verify_io
 test_rvv_bin
+build/
+*.raw
+*.o
+*.elf
+*.exe
+vec_report.txt
+spatial_vec_report.txt
+separable_vec_report.txt

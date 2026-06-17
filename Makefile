@@ -1,137 +1,173 @@
+.RECIPEPREFIX := >
+
 VLEN ?= 128
-HOST_CXX = g++
-RV_CXX   = riscv64-unknown-elf-g++
+
+HOST_CXX := g++
+RV_CXX := riscv64-linux-gnu-g++
+QEMU := qemu-riscv64
+OBJDUMP := riscv64-linux-gnu-objdump
+TIME := /usr/bin/time
 
 HOST_FLAGS = -Wall -Wextra -O2 -Iinclude
-RV_FLAGS   = -Wall -Wextra -Iinclude -march=rv64gcv -static
+RV_FLAGS   = -Wall -Wextra -O2 -Iinclude -march=rv64gcv -static
+HOST_LIBS := -lgtest -lgtest_main -pthread -lm
+RV_LIBS := -lm
 
-BUILD_DIR_HOST = build/host
-BUILD_DIR_RV   = build/rv
-BUILD_DIR_P4   = build/phase4
+BUILD_DIR_HOST := build/host
+BUILD_DIR_RV := build/rv
+BUILD_DIR_P4 := build/phase4
 
-# Source files shared between host tests and phase4 benchmark
-PIPELINE_SRCS = src/image_io.cpp \
-                src/gaussian_blur.cpp \
-                src/sobel.cpp \
-                src/magnitude.cpp \
-                src/direction.cpp
+PIPELINE_SRCS := \
+	src/image_io.cpp \
+	src/gaussian_blur.cpp \
+	src/sobel.cpp \
+	src/magnitude.cpp \
+	src/direction.cpp
 
-# ─────────────────────────────────────────────────────────────
-# Default
-# ─────────────────────────────────────────────────────────────
+PHASE4_SRC := Test/benchmark.cpp
+VEC_REPORT := $(BUILD_DIR_P4)/vec_report.txt
+
+.PHONY: all test canny_rv run clean \
+	phase4 phase4_build phase4_sweep phase4_sizes phase4_vec_count
+
 all: test canny_rv
 
-# ─────────────────────────────────────────────────────────────
-# Phase 3: Host-side GoogleTest
-# ─────────────────────────────────────────────────────────────
-test:
-	mkdir -p $(BUILD_DIR_HOST)
-	$(HOST_CXX) $(HOST_FLAGS) src/host_tests.cpp src/image_io.cpp src/gaussian_blur.cpp src/sobel.cpp src/magnitude.cpp src/direction.cpp -o $(BUILD_DIR_HOST)/test_runner -lgtest -lgtest_main -pthread
-	./$(BUILD_DIR_HOST)/test_runner
+$(BUILD_DIR_HOST):
+> mkdir -p $(BUILD_DIR_HOST)
 
-# ─────────────────────────────────────────────────────────────
-# Phase 4: Compiler Optimization Sweep (cross-compiled, run on QEMU)
-#
-# Each target compiles the SAME benchmark source at a different
-# optimization level so results are directly comparable.
-# The benchmark times all four pipeline stages:
-#   Gaussian | Sobel | Magnitude | Direction
-# ─────────────────────────────────────────────────────────────
-
-# Benchmark binary at each optimization level
-$(BUILD_DIR_P4)/bench_O0: Test/benchmark.cpp $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
-	$(RV_CXX) -O0 $(RV_FLAGS) $^ -o $@
-
-$(BUILD_DIR_P4)/bench_O1: Test/benchmark.cpp $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
-	$(RV_CXX) -O1 $(RV_FLAGS) $^ -o $@
-
-$(BUILD_DIR_P4)/bench_O2: Test/benchmark.cpp $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
-	$(RV_CXX) -O2 $(RV_FLAGS) $^ -o $@
-
-$(BUILD_DIR_P4)/bench_O3: Test/benchmark.cpp $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
-	$(RV_CXX) -O3 $(RV_FLAGS) $^ -o $@
-
-# -O3 + auto-vectorization report written to vec_report.txt
-# -fopt-info-vec-all  → shows which loops vectorized and which were rejected
-# -ftree-vectorize    → explicitly enables auto-vectorization (implied by -O3 but stated clearly)
-$(BUILD_DIR_P4)/bench_O3_vec: Test/benchmark.cpp $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
-	$(RV_CXX) -O3 -ftree-vectorize $(RV_FLAGS) $^ -o $@ \
-		-fopt-info-vec-all 2> vec_report.txt
+$(BUILD_DIR_RV):
+> mkdir -p $(BUILD_DIR_RV)
 
 $(BUILD_DIR_P4):
-	mkdir -p $(BUILD_DIR_P4)
+> mkdir -p $(BUILD_DIR_P4)
 
-# Build all phase4 binaries
-phase4_build: $(BUILD_DIR_P4)/bench_O0 \
-              $(BUILD_DIR_P4)/bench_O1 \
-              $(BUILD_DIR_P4)/bench_O2 \
-              $(BUILD_DIR_P4)/bench_O3 \
-              $(BUILD_DIR_P4)/bench_O3_vec
+test: | $(BUILD_DIR_HOST)
+> $(HOST_CXX) $(HOST_FLAGS) \
+> 	src/host_tests.cpp \
+> 	$(PIPELINE_SRCS) \
+> 	-o $(BUILD_DIR_HOST)/test_runner \
+> 	$(HOST_LIBS)
+> ./$(BUILD_DIR_HOST)/test_runner
 
-# Run the full optimization sweep on QEMU and print a results table
-# Output maps directly to the report table:
-#   Stage | -O0 | -O1 | -O2 | -O3 | Auto-vec
+# ─────────────────────────────────────────────────────────────
+# Phase 4: Compiler Optimization Sweep
+#
+# The terminal shows:
+#   1. Compile time for every optimization binary.
+#   2. Runtime for spatial 2D Gaussian.
+#   3. Runtime for separable 1D Gaussian.
+#   4. Runtime for the rest of the scalar pipeline.
+#   5. Binary size.
+#   6. Auto-vectorization evidence.
+# ─────────────────────────────────────────────────────────────
+
+$(BUILD_DIR_P4)/bench_O0: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling O0..."
+> $(TIME) -f "compile_time O0: %e sec" \
+> 	$(RV_CXX) -O0 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+$(BUILD_DIR_P4)/bench_O2: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling O2..."
+> $(TIME) -f "compile_time O2: %e sec" \
+> 	$(RV_CXX) -O2 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+$(BUILD_DIR_P4)/bench_O3: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling O3..."
+> $(TIME) -f "compile_time O3: %e sec" \
+> 	$(RV_CXX) -O3 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+$(BUILD_DIR_P4)/bench_Os: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling Os..."
+> $(TIME) -f "compile_time Os: %e sec" \
+> 	$(RV_CXX) -Os $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+$(BUILD_DIR_P4)/bench_Ofast: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling Ofast..."
+> $(TIME) -f "compile_time Ofast: %e sec" \
+> 	$(RV_CXX) -Ofast $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+$(BUILD_DIR_P4)/bench_O3_vec: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+> @echo "Compiling O3_vec..."
+> $(TIME) -f "compile_time O3_vec: %e sec" \
+> 	$(RV_CXX) -O3 -ftree-vectorize -fopt-info-vec-all=$(VEC_REPORT) \
+> 	$(RV_FLAGS) $^ -o $@ $(RV_LIBS)
+
+phase4_build: \
+	$(BUILD_DIR_P4)/bench_O0 \
+	$(BUILD_DIR_P4)/bench_O2 \
+	$(BUILD_DIR_P4)/bench_O3 \
+	$(BUILD_DIR_P4)/bench_Os \
+	$(BUILD_DIR_P4)/bench_Ofast \
+	$(BUILD_DIR_P4)/bench_O3_vec
+
 phase4_sweep: phase4_build
-	@echo ""
-	@echo "============================================================"
-	@echo "  Phase 4: Compiler Optimization Sweep"
-	@echo "  (wall-clock timing via CLOCK_MONOTONIC, 200 iterations)"
-	@echo "============================================================"
-	@echo ""
-	@echo "--- -O0 ---"
-	@qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_O0
-	@echo ""
-	@echo "--- -O1 ---"
-	@qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_O1
-	@echo ""
-	@echo "--- -O2 ---"
-	@qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_O2
-	@echo ""
-	@echo "--- -O3 ---"
-	@qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_O3
-	@echo ""
-	@echo "--- -O3 + auto-vectorize ---"
-	@qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_O3_vec
+> @echo ""
+> @echo "============================================================"
+> @echo " Phase 4: Compiler Optimization Sweep"
+> @echo " VLEN=$(VLEN)"
+> @echo " Runtime timing: CLOCK_MONOTONIC, 200 iterations per stage"
+> @echo "============================================================"
+> @echo ""
+> @for level in O0 O2 O3 Os Ofast O3_vec; do \
+> 	echo "------------------------------------------------------------"; \
+> 	echo "Running $$level"; \
+> 	echo "------------------------------------------------------------"; \
+> 	$(QEMU) -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_$$level; \
+> 	echo ""; \
+> done
 
-# Print binary sizes for the report table
 phase4_sizes: phase4_build
-	@echo ""
-	@echo "====== Binary Sizes ======"
-	@for level in O0 O1 O2 O3 O3_vec; do \
-		printf "  %-12s %s bytes\n" $$level \
-		$$(stat -c%s $(BUILD_DIR_P4)/bench_$$level); \
-	done
+> @echo ""
+> @echo "============================================================"
+> @echo " Binary Sizes"
+> @echo "============================================================"
+> @for level in O0 O2 O3 Os Ofast O3_vec; do \
+> 	printf "%-10s %s bytes\n" "$$level" "$$(stat -c%s $(BUILD_DIR_P4)/bench_$$level)"; \
+> done
 
-# Count RVV vector instructions in the auto-vec binary
-# A non-zero count means the compiler did emit vector instructions
 phase4_vec_count: $(BUILD_DIR_P4)/bench_O3_vec
-	@echo ""
-	@echo "====== Vector Instruction Count (vset* instructions) ======"
-	@riscv64-unknown-elf-objdump -d $(BUILD_DIR_P4)/bench_O3_vec \
-		| grep -c vset || true
-	@echo ""
-	@echo "====== Auto-vectorization Report ======"
-	@echo "(see vec_report.txt for full details)"
-	@echo "--- Loops that FAILED to vectorize ---"
-	@grep "missed" vec_report.txt | head -20 || true
-	@echo "--- Loops that SUCCEEDED ---"
-	@grep "vectorized" vec_report.txt | grep -v "missed" | head -20 || true
+> @echo ""
+> @echo "============================================================"
+> @echo " Auto-vectorization Evidence"
+> @echo "============================================================"
+> @echo "Vector setup instruction count in O3_vec binary:"
+> @$(OBJDUMP) -d $(BUILD_DIR_P4)/bench_O3_vec | grep -c "vset" || true
+> @echo ""
+> @echo "Auto-vectorization report: $(VEC_REPORT)"
+> @echo ""
+> @echo "--- First missed vectorization messages ---"
+> @grep -i "missed" $(VEC_REPORT) | head -20 || true
+> @echo ""
+> @echo "--- First successful vectorization messages ---"
+> @grep -i "vectorized" $(VEC_REPORT) | grep -vi "missed" | head -20 || true
 
-# Run everything for Phase 4 in one shot
 phase4: phase4_sweep phase4_sizes phase4_vec_count
 
-# ─────────────────────────────────────────────────────────────
-# RISC-V pipeline binary (Phase 5+)
-# ─────────────────────────────────────────────────────────────
-canny_rv:
-	mkdir -p $(BUILD_DIR_RV)
-	$(RV_CXX) $(RV_FLAGS) src/main.cpp $(PIPELINE_SRCS) -o $(BUILD_DIR_RV)/canny_rv
+canny_rv: | $(BUILD_DIR_RV)
+> $(RV_CXX) -O2 $(RV_FLAGS) \
+> 	src/main.cpp \
+> 	$(PIPELINE_SRCS) \
+> 	-o $(BUILD_DIR_RV)/canny_rv \
+> 	$(RV_LIBS)
 
 run: canny_rv
-	qemu-riscv64 -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_RV)/canny_rv
+> $(QEMU) -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_RV)/canny_rv
 
-# ─────────────────────────────────────────────────────────────
-# Utilities
-# ─────────────────────────────────────────────────────────────
 clean:
-	rm -rf build/ vec_report.txt
+> rm -rf build vec_report.txt
+
+.PHONY: phase5
+
+phase5: $(BUILD_DIR_P4)/bench_Ofast
+> @echo ""
+> @echo "============================================================"
+> @echo " Phase 5: Profiling and Hotspot Identification"
+> @echo " Build used: Ofast"
+> @echo " VLEN=$(VLEN)"
+> @echo " Output saved to: $(BUILD_DIR_P4)/phase5_hotspots.txt"
+> @echo "============================================================"
+> @$(QEMU) -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_Ofast | tee $(BUILD_DIR_P4)/phase5_hotspots.txt
+> @echo ""
+> @echo "Phase 5 interpretation:"
+> @echo "Use the per-stage timings above to compute percentages."
+> @echo "The hottest stages should be optimized first in Phase 6."

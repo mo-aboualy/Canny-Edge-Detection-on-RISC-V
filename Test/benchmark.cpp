@@ -1,145 +1,190 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include "image_io.h"
 #include "gaussian_blur.h"
-#include "vectorization_analysis.h"
 #include "sobel.h"
 #include "magnitude.h"
 #include "direction.h"
 #include "timer.h"
 
-#define W     512
-#define H     512
-#define ITERS 200
+static constexpr int W = 512;
+static constexpr int H = 512;
+static constexpr int ITERS = 200;
+static constexpr size_t ALIGNMENT = 64;
 
-int main() {
-    size_t alloc_size = (W * H + 63) & ~63;
+static size_t round_up_to_alignment(size_t bytes) {
+    return (bytes + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1);
+}
 
-    // ── Step 1: Allocate all buffers ──────────────────────────
-    uint8_t* raw_input = (uint8_t*)aligned_alloc(64, alloc_size);
-    if (!raw_input) { printf("Error: raw_input alloc failed.\n"); return 1; }
+static uint8_t* alloc_u8_buffer(size_t count) {
+    const size_t bytes = round_up_to_alignment(count * sizeof(uint8_t));
+    uint8_t* ptr = static_cast<uint8_t*>(aligned_alloc(ALIGNMENT, bytes));
 
-    uint8_t* raw_output = (uint8_t*)aligned_alloc(64, alloc_size);
-    if (!raw_output) { printf("Error: raw_output alloc failed.\n"); free(raw_input); return 1; }
-
-    uint8_t* blur_out_pixels = (uint8_t*)aligned_alloc(64, alloc_size);
-    if (!blur_out_pixels) { printf("Error: blur_out_pixels alloc failed.\n"); free(raw_output); free(raw_input); return 1; }
-
-    uint8_t* mag_out = (uint8_t*)aligned_alloc(64, alloc_size);
-    if (!mag_out) { printf("Error: mag_out alloc failed.\n"); free(blur_out_pixels); free(raw_output); free(raw_input); return 1; }
-
-    uint8_t* dir_out = (uint8_t*)aligned_alloc(64, alloc_size);
-    if (!dir_out) { printf("Error: dir_out alloc failed.\n"); free(mag_out); free(blur_out_pixels); free(raw_output); free(raw_input); return 1; }
-
-    // ── Step 2: Fill input with fake pixel data ───────────────
-    for (int i = 0; i < W * H; i++)
-        raw_input[i] = (uint8_t)(i % 256);
-
-    // ── Step 3: Wrap raw pointers in Image structs ────────────
-    Image input_img;
-    input_img.width  = W;
-    input_img.height = H;
-    input_img.pixels = raw_input;
-
-    // blur_img is used as both output of gaussian and input of sobel
-    Image blur_img;
-    blur_img.width  = W;
-    blur_img.height = H;
-    blur_img.pixels = blur_out_pixels;
-
-    // ── Step 4: Pre-compute valid data for downstream stages ──
-    // Must run gaussian first so blur_img contains real data,
-    // not uninitialized memory, before passing it into sobel.
-    gaussian_blur_5x5(input_img, blur_img);
-
-    GradientImage gradient;
-    gradient.gx        = nullptr;
-    gradient.gy        = nullptr;
-    gradient.magnitude = nullptr;
-    gradient.width     = W;
-    gradient.height    = H;
-
-    // Run sobel once to populate gradient.gx and gradient.gy
-    // so magnitude and direction benchmarks have valid input data.
-    sobel_3x3(blur_img, gradient);
-
-    // ── Section 1: Vectorization Analysis ────────────────────
-    printf("======================================================\n");
-    printf("  Section 1: Vectorization Analysis (Gaussian only)\n");
-    printf("  scalar = with boundary check  -> compiler CANNOT vectorize\n");
-    printf("  padded = with pre-padding     -> compiler CAN vectorize\n");
-    printf("======================================================\n");
-
-    BENCHMARK("gaussian_scalar (check)  ", ITERS,
-              gaussian_blur_scalar(raw_input, raw_output, W, H));
-
-    BENCHMARK("gaussian_padded (no check)", ITERS,
-              gaussian_blur_padded(raw_input, raw_output, W, H));
-
-    printf("\n  NOTE: See vec_report.txt for compiler auto-vec analysis.\n");
-    printf("  A speedup from padded over scalar indicates the compiler\n");
-    printf("  successfully vectorized the boundary-check-free version.\n\n");
-
-    // ── Section 2: Pipeline Stage Timing ─────────────────────
-    printf("======================================================\n");
-    printf("  Section 2: Full Pipeline Stage Timing\n");
-    printf("  All 4 stages benchmarked using real pipeline functions\n");
-    printf("  Results map directly to the Phase 4 report table\n");
-    printf("======================================================\n");
-
-    // Stage 1: Gaussian
-    BENCHMARK("1. Gaussian blur 5x5     ", ITERS,
-              gaussian_blur_5x5(input_img, blur_img));
-
-    // Stage 2: Sobel — benchmarked manually because sobel_3x3 calls
-    // aligned_alloc internally on every call. Using the BENCHMARK macro
-    // would leak memory on all 200 iterations. Instead we time the
-    // alloc+compute cycle honestly (ITERS iterations, divide by ITERS),
-    // then restore the gradient once outside the timed window so
-    // magnitude and direction still have valid data.
-    {
-        uint64_t t0 = get_ns();
-        for (int i = 0; i < ITERS; i++) {
-            sobel_3x3(blur_img, gradient);
-            gradient_free(gradient);
-        }
-        uint64_t t1 = get_ns();
-        printf("%-25s %llu ns/call\n", "2. Sobel 3x3",
-               (unsigned long long)((t1 - t0) / ITERS));
+    if (!ptr) {
+        std::printf("ERROR: aligned_alloc failed for %zu bytes\n", bytes);
+        std::exit(1);
     }
 
-    // Restore gradient outside the timed window for stages 3 and 4.
-    // Note: gradient.gx/gy are uint16_t* internally but mag_out and
-    // dir_out are separate uint8_t* buffers — they are not the same.
-    sobel_3x3(blur_img, gradient);
+    std::memset(ptr, 0, bytes);
+    return ptr;
+}
 
-    // Stage 3: Magnitude — takes raw int16_t* pointers, no allocation
-    BENCHMARK("3. Magnitude (L1)        ", ITERS,
-              gradient_magnitude(gradient.gx, gradient.gy, mag_out, W, H));
+static void fill_test_pattern(uint8_t* data, int width, int height) {
+    /*
+     * Deterministic synthetic image.
+     * This avoids file I/O during benchmarking and makes every optimization
+     * level run the same workload.
+     */
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int gradient = (x + y) & 0xFF;
+            const int rectangle =
+                (x > width / 4 && x < 3 * width / 4 &&
+                 y > height / 4 && y < 3 * height / 4)
+                    ? 96
+                    : 0;
 
-    // Stage 4: Direction — takes raw int16_t* pointers, no allocation
-    BENCHMARK("4. Direction             ", ITERS,
-              gradient_direction(gradient.gx, gradient.gy, dir_out, W, H));
+            data[y * width + x] =
+                static_cast<uint8_t>((gradient + rectangle) & 0xFF);
+        }
+    }
+}
 
-    // ── Report table shell ────────────────────────────────────
-    printf("\n======================================================\n");
-    printf("  Copy ns/call values into the report table:\n");
-    printf("  Stage              | this run | -O0 | -O1 | -O2 | -O3 | vec\n");
-    printf("  Gaussian 5x5       |          |     |     |     |     |\n");
-    printf("  Sobel 3x3          |          |     |     |     |     |\n");
-    printf("  Magnitude (L1)     |          |     |     |     |     |\n");
-    printf("  Direction          |          |     |     |     |     |\n");
-    printf("======================================================\n\n");
+static int max_abs_diff_u8(
+    const uint8_t* a,
+    const uint8_t* b,
+    size_t count
+) {
+    int max_diff = 0;
 
-    // ── Cleanup ───────────────────────────────────────────────
+    for (size_t i = 0; i < count; ++i) {
+        const int diff = static_cast<int>(a[i]) - static_cast<int>(b[i]);
+        const int abs_diff = diff < 0 ? -diff : diff;
+
+        if (abs_diff > max_diff) {
+            max_diff = abs_diff;
+        }
+    }
+
+    return max_diff;
+}
+
+static void benchmark_sobel_stage(const Image& blurred) {
+    const uint64_t t0 = get_ns();
+
+    for (int i = 0; i < ITERS; ++i) {
+        GradientImage temp{};
+        sobel_3x3(blurred, temp);
+        gradient_free(temp);
+    }
+
+    const uint64_t t1 = get_ns();
+    const unsigned long long avg =
+        static_cast<unsigned long long>(
+            (t1 - t0) / static_cast<uint64_t>(ITERS)
+        );
+
+    std::printf("%-34s %llu ns/call\n", "3. Sobel 3x3", avg);
+}
+
+int main() {
+    const size_t pixel_count =
+        static_cast<size_t>(W) * static_cast<size_t>(H);
+
+    uint8_t* input_pixels = alloc_u8_buffer(pixel_count);
+    uint8_t* spatial_pixels = alloc_u8_buffer(pixel_count);
+    uint8_t* separable_pixels = alloc_u8_buffer(pixel_count);
+    uint8_t* mag_l1_pixels = alloc_u8_buffer(pixel_count);
+    uint8_t* mag_l2_pixels = alloc_u8_buffer(pixel_count);
+    uint8_t* dir_pixels = alloc_u8_buffer(pixel_count);
+
+    fill_test_pattern(input_pixels, W, H);
+
+    Image input_img{};
+    input_img.width = W;
+    input_img.height = H;
+    input_img.pixels = input_pixels;
+
+    Image spatial_img{};
+    spatial_img.width = W;
+    spatial_img.height = H;
+    spatial_img.pixels = spatial_pixels;
+
+    Image separable_img{};
+    separable_img.width = W;
+    separable_img.height = H;
+    separable_img.pixels = separable_pixels;
+
+    /*
+     * Warm-up and correctness comparison.
+     */
+    gaussian_blur_5x5_spatial_2d(input_img, spatial_img);
+    gaussian_blur_5x5_separable_1d(input_img, separable_img);
+
+    const int gaussian_max_diff =
+        max_abs_diff_u8(spatial_pixels, separable_pixels, pixel_count);
+
+    GradientImage gradient{};
+    sobel_3x3(spatial_img, gradient);
+
+    std::printf("============================================================\n");
+    std::printf(" Phase 4 Benchmark Configuration\n");
+    std::printf(" Image size: %dx%d\n", W, H);
+    std::printf(" Iterations per stage: %d\n", ITERS);
+    std::printf(" Timer: CLOCK_MONOTONIC via get_ns()\n");
+    std::printf("============================================================\n\n");
+
+    std::printf("============================================================\n");
+    std::printf(" Gaussian Implementation Comparison\n");
+    std::printf(" spatial 2D : direct 5x5 matrix convolution\n");
+    std::printf(" separable  : 1D horizontal pass + 1D vertical pass\n");
+    std::printf(" max absolute difference: %d\n", gaussian_max_diff);
+    std::printf("============================================================\n");
+
+    BENCHMARK("1. Gaussian spatial 2D", ITERS,
+              gaussian_blur_5x5_spatial_2d(input_img, spatial_img));
+
+    BENCHMARK("2. Gaussian separable 1D", ITERS,
+              gaussian_blur_5x5_separable_1d(input_img, separable_img));
+
+    std::printf("\n");
+    std::printf("============================================================\n");
+    std::printf(" Scalar Pipeline Timing\n");
+    std::printf(" Pipeline uses spatial 2D Gaussian as the reference path.\n");
+    std::printf("============================================================\n");
+
+    benchmark_sobel_stage(spatial_img);
+
+    BENCHMARK("4. Magnitude L1", ITERS,
+              gradient_magnitude_l1(gradient.gx, gradient.gy, mag_l1_pixels, W, H));
+
+    BENCHMARK("5. Magnitude L2", ITERS,
+              gradient_magnitude_l2(gradient.gx, gradient.gy, mag_l2_pixels, W, H));
+
+    BENCHMARK("6. Direction", ITERS,
+              gradient_direction(gradient.gx, gradient.gy, dir_pixels, W, H));
+
+    std::printf("\n");
+    std::printf("Report table columns:\n");
+    std::printf("Stage | -O0 | -O2 | -O3 | -Os | -Ofast | Auto-vec\n");
+    std::printf("Gaussian spatial 2D   | ___ | ___ | ___ | ___ | ___ | ___\n");
+    std::printf("Gaussian separable 1D | ___ | ___ | ___ | ___ | ___ | ___\n");
+    std::printf("Sobel 3x3             | ___ | ___ | ___ | ___ | ___ | ___\n");
+    std::printf("Magnitude L1          | ___ | ___ | ___ | ___ | ___ | ___\n");
+    std::printf("Magnitude L2          | ___ | ___ | ___ | ___ | ___ | ___\n");
+    std::printf("Direction             | ___ | ___ | ___ | ___ | ___ | ___\n");
+
     gradient_free(gradient);
-    free(dir_out);
-    free(mag_out);
-    free(blur_out_pixels);
-    free(raw_output);
-    free(raw_input);
+
+    std::free(dir_pixels);
+    std::free(mag_l2_pixels);
+    std::free(mag_l1_pixels);
+    std::free(separable_pixels);
+    std::free(spatial_pixels);
+    std::free(input_pixels);
 
     return 0;
 }

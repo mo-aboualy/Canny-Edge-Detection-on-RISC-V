@@ -142,7 +142,7 @@ int main(int argc, char* argv[]) {
 
     t0 = profiler_now();
     for (int i = 0; i < ITERS; i++) {
-        gaussian_blur_5x5(src, blurred);
+        gaussian_blur_5x5_separable_1d(src, blurred);
     }
     t1 = profiler_now();
     ns_gaussian = t1 - t0;

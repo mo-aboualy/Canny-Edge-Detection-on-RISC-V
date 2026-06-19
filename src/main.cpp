@@ -1,168 +1,250 @@
+/**
+ * @file main.cpp
+ * @brief Phase 4/5/6 — Canny pipeline profiling on RISC-V / QEMU.
+ *
+ * Consolidates the old benchmark.cpp and the old main.cpp into one file.
+ *
+ * Timer: get_ns() via Linux syscall 113 (clock_gettime / CLOCK_MONOTONIC).
+ * This is the correct timer for QEMU user-mode because it measures
+ * wall-clock time, not emulated cycle counts.  rdcycle is NOT used.
+ *
+ * Build:
+ * make run            (VLEN=128, default)
+ * make run VLEN=256
+ * make run VLEN=512
+ *
+ * Usage (optional args):
+ * ./canny_rv [width height iters]
+ */
+
 #include "image_io.h"
 #include "gaussian_blur.h"
 #include "sobel.h"
 #include "magnitude.h"
 #include "direction.h"
-#include "profiler.h"
+#include "timer.h"         // get_ns() — CLOCK_MONOTONIC via ecall
+#include "gaussian_rvv.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
 
-// Allocate a zeroed image buffer.
-// We use aligned_alloc(64, ...) everywhere — not just for RVV in Phase 6,
-// but because the compiler is more willing to auto-vectorize aligned loads.
-static Image alloc_image(uint32_t w, uint32_t h) {
-    Image img;
-    img.width  = w;
-    img.height = h;
-    size_t sz  = (size_t)w * h;
-    size_t aligned_sz = (sz + 63) & ~63; // round up to 64-byte boundary
-    img.pixels = (uint8_t*)aligned_alloc(64, aligned_sz);
-    if (!img.pixels) {
-        fprintf(stderr, "ERROR: aligned_alloc failed for %ux%u image\n", w, h);
-        exit(1);
-    }
-    memset(img.pixels, 0, sz);
-    return img;
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+static constexpr int32_t ALIGNMENT = 64;
+
+/** Round n up to the next multiple of 64. */
+static inline size_t align64(size_t n) { return (n + 63) & ~static_cast<size_t>(63); }
+
+/** Allocate a 64-byte-aligned, zero-filled pixel buffer. */
+static uint8_t* alloc_pixels(size_t count) {
+    uint8_t* p = static_cast<uint8_t*>(aligned_alloc(ALIGNMENT, align64(count)));
+    if (!p) { std::fprintf(stderr, "ERROR: aligned_alloc failed\n"); std::exit(1); }
+    std::memset(p, 0, count);
+    return p;
 }
 
-// Build a fake test image we can run the pipeline on.
-// It's a left-to-right gradient with a bright stripe down the middle.
-// The stripe gives Sobel something real to react to, so the timing
-// reflects actual edge-detection work rather than a trivial all-zero case.
-static void generate_test_image(Image& img) {
-    const uint32_t W  = img.width;
-    const uint32_t H  = img.height;
-    const uint32_t cx = W / 2;
-
-    for (uint32_t y = 0; y < H; y++) {
-        for (uint32_t x = 0; x < W; x++) {
-            uint8_t val = (uint8_t)(x % 256);
-            if (x >= cx - 32 && x < cx + 32)
-                val = 255; // hard vertical edge on both sides of the stripe
-            img.pixels[y * W + x] = val;
+/** Build a synthetic test image: gradient + bright vertical stripe. */
+static void fill_test_image(uint8_t* pixels, int32_t W, int32_t H) {
+    const int32_t cx = W / 2;
+    for (int32_t y = 0; y < H; ++y) {
+        for (int32_t x = 0; x < W; ++x) {
+            uint8_t v = static_cast<uint8_t>((x + y) & 0xFF);
+            if (x >= cx - 32 && x < cx + 32) v = 255; // hard vertical edge
+            pixels[y * W + x] = v;
         }
     }
 }
 
-// --- printing helpers 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pretty-print helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 static void print_separator() {
-    printf("  %-28s  %-16s  %-6s\n",
-           "────────────────────────────",
-           "────────────────",
-           "──────");
+    std::printf("  %-32s  %-16s  %s\n",
+        "────────────────────────────────",
+        "────────────────",
+        "──────");
 }
 
 static void print_header() {
-    printf("\n");
-    printf("  %-28s  %-16s  %-6s\n", "Stage", "avg ms / call", "share");
+    std::printf("\n");
+    std::printf("  %-32s  %-16s  %s\n", "Stage", "avg ms / call", "share");
     print_separator();
 }
 
-static void print_row(const char* name, uint64_t total_ns, int iters, double pct) {
-    double avg_ms = profiler_ns_to_ms(total_ns) / (double)iters;
-    printf("  %-28s  %8.3f ms         %5.1f%%\n", name, avg_ms, pct);
+static void print_row(const char* name, uint64_t total_ns,
+                      int iters, double share_pct) {
+    double avg_ms = static_cast<double>(total_ns)
+                    / (static_cast<double>(iters) * 1.0e6);
+    std::printf("  %-32s  %8.3f ms       %5.1f%%\n", name, avg_ms, share_pct);
 }
 
-static void print_total(uint64_t total_ns, int iters) {
+static void print_total(uint64_t ns, int iters) {
     print_separator();
-    double avg_ms = profiler_ns_to_ms(total_ns) / (double)iters;
-    printf("  %-28s  %8.3f ms         %5.1f%%\n", "TOTAL PIPELINE", avg_ms, 100.0);
+    double avg_ms = static_cast<double>(ns)
+                    / (static_cast<double>(iters) * 1.0e6);
+    std::printf("  %-32s  %8.3f ms       %5.1f%%\n",
+                "TOTAL PIPELINE", avg_ms, 100.0);
 }
 
-
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+
+    // ── Configuration ────────────────────────────────────────────────────────
     uint32_t W     = 512;
     uint32_t H     = 512;
     int      ITERS = 100;
 
     if (argc >= 3) {
-        W = (uint32_t)atoi(argv[1]);
-        H = (uint32_t)atoi(argv[2]);
+        W = static_cast<uint32_t>(std::atoi(argv[1]));
+        H = static_cast<uint32_t>(std::atoi(argv[2]));
     }
-    if (argc >= 4) {
-        ITERS = atoi(argv[3]);
-    }
+    if (argc >= 4) ITERS = std::atoi(argv[3]);
+
     if (W < 5 || H < 5 || ITERS < 1) {
-        fprintf(stderr, "Usage: %s [width height iters]\n", argv[0]);
-        fprintf(stderr, "  width/height >= 5, iters >= 1\n");
+        std::fprintf(stderr,
+            "Usage: %s [width height iters]   (width/height >= 5, iters >= 1)\n",
+            argv[0]);
         return 1;
     }
 
-    printf("\n=== Phase 5: Canny Pipeline Profiling ===\n");
-    printf("Image size : %u x %u  (%u pixels)\n", W, H, W * H);
-    printf("Iterations : %d per stage\n", ITERS);
-    printf("(QEMU wall-clock — percentages are what matter, not absolute ms)\n");
+    const size_t N = static_cast<size_t>(W) * H;
 
-    // --- allocate all buffers up front --------------------------------------
-    //
-    // We allocate everything before the timed loops so malloc overhead
-    // doesn't show up in the measurements. All buffers are 64-byte aligned.
+    std::printf("\n=== Canny Pipeline Profiling (Phase 4 / 5 / 6) ===\n");
+    std::printf("Image      : %u x %u  (%zu pixels)\n", W, H, N);
+    std::printf("Iterations : %d per stage\n", ITERS);
+    std::printf("Timer      : CLOCK_MONOTONIC via get_ns() (wall-clock, QEMU-safe)\n");
+    std::printf("NOTE: percentages matter more than absolute ms values under QEMU.\n");
 
-    Image src     = alloc_image(W, H);
-    Image blurred = alloc_image(W, H);
+    // ── Pre-allocate all buffers ─────────────────────────────────────────────
+    // Allocating outside the timed loops avoids malloc noise in measurements.
 
-    // Gradient buffers (gx, gy, magnitude). Normally sobel_3x3() allocates
-    // these itself, but we pre-allocate here so the timing loop isn't
-    // measuring malloc instead of the actual Sobel math.
+    // Source image
+    Image src;
+    src.width  = W;
+    src.height = H;
+    src.pixels = alloc_pixels(N);
+    fill_test_image(src.pixels, static_cast<int32_t>(W), static_cast<int32_t>(H));
+
+    // Blurred output (shared by all Gaussian variants; overwritten each iter)
+    Image blurred;
+    blurred.width  = W;
+    blurred.height = H;
+    blurred.pixels = alloc_pixels(N);
+
+    // Gradient buffers (sobel_3x3 normally allocates internally; we pre-allocate
+    // so the Sobel timing measures convolution, not malloc).
     GradientImage grad;
-    {
-        size_t count      = (size_t)W * H;
-        size_t aligned_sz = (count + 63) & ~63;
-        grad.width     = W;
-        grad.height    = H;
-        grad.gx        = (int16_t* )aligned_alloc(64, aligned_sz * sizeof(int16_t));
-        grad.gy        = (int16_t* )aligned_alloc(64, aligned_sz * sizeof(int16_t));
-        grad.magnitude = (uint16_t*)aligned_alloc(64, aligned_sz * sizeof(uint16_t));
-        if (!grad.gx || !grad.gy || !grad.magnitude) {
-            fprintf(stderr, "ERROR: gradient buffer allocation failed\n");
-            return 1;
-        }
-    }
-
-    size_t   px       = (size_t)W * H;
-    size_t   px_align = (px + 63) & ~63;
-    uint8_t* mag_u8   = (uint8_t*)aligned_alloc(64, px_align); // normalized magnitude
-    uint8_t* dir      = (uint8_t*)aligned_alloc(64, px_align); // direction bins
-    if (!mag_u8 || !dir) {
-        fprintf(stderr, "ERROR: output buffer allocation failed\n");
+    grad.width     = W;
+    grad.height    = H;
+    grad.gx        = static_cast<int16_t* >(
+                         aligned_alloc(ALIGNMENT, align64(N * sizeof(int16_t))));
+    grad.gy        = static_cast<int16_t* >(
+                         aligned_alloc(ALIGNMENT, align64(N * sizeof(int16_t))));
+    grad.magnitude = static_cast<uint16_t*>(
+                         aligned_alloc(ALIGNMENT, align64(N * sizeof(uint16_t))));
+    if (!grad.gx || !grad.gy || !grad.magnitude) {
+        std::fprintf(stderr, "ERROR: gradient buffer allocation failed\n");
         return 1;
     }
+    std::memset(grad.gx,        0, N * sizeof(int16_t));
+    std::memset(grad.gy,        0, N * sizeof(int16_t));
+    std::memset(grad.magnitude, 0, N * sizeof(uint16_t));
 
-    generate_test_image(src);
+    // Magnitude (uint8_t) and direction outputs
+    uint8_t* mag_u8 = alloc_pixels(N);
+    uint8_t* dir    = alloc_pixels(N);
+
+    // ── Correctness check: spatial_2d vs separable_1d vs rvv ─────────────────
+    {
+        uint8_t* out_spatial   = alloc_pixels(N);
+        uint8_t* out_separable = alloc_pixels(N);
+        uint8_t* out_rvv       = alloc_pixels(N);
+
+        Image tmp_sp  = { W, H, out_spatial   };
+        Image tmp_sep = { W, H, out_separable };
+        Image tmp_rvv = { W, H, out_rvv       };
+
+        gaussian_blur_5x5_spatial_2d   (src, tmp_sp);
+        gaussian_blur_5x5_separable_1d (src, tmp_sep);
+        gaussian_blur_5x5_rvv          (src, tmp_rvv);
+
+        int max_diff = 0;
+        for (size_t i = 0; i < N; ++i) {
+            int d = static_cast<int>(out_spatial[i]) - static_cast<int>(out_separable[i]);
+            if (d < 0) d = -d;
+            if (d > max_diff) max_diff = d;
+        }
+        std::printf("\nGaussian correctness: spatial_2d vs separable_1d "
+                    "max |diff| = %d pixel(s)  %s\n",
+                    max_diff, max_diff <= 1 ? "(PASS)" : "(WARN — check kernel)");
+
+        // Gaussian correctness: separable_1d vs rvv
+        int max_diff_rvv = 0;
+        for (size_t i = 0; i < N; ++i) {
+            int d = static_cast<int>(out_separable[i]) - static_cast<int>(out_rvv[i]);
+            if (d < 0) d = -d;
+            if (d > max_diff_rvv) max_diff_rvv = d;
+        }
+        std::printf("Gaussian correctness: separable_1d vs rvv "
+                    "max |diff| = %d pixel(s)  %s\n",
+                    max_diff_rvv, max_diff_rvv <= 1 ? "(PASS)" : "(FAIL)");
+
+        std::free(out_spatial);
+        std::free(out_separable);
+        std::free(out_rvv);
+    }
+
+    // ── Benchmarking ─────────────────────────────────────────────────────────
 
     uint64_t t0, t1;
-    uint64_t ns_gaussian, ns_sobel, ns_magnitude, ns_direction;
+    uint64_t ns_spatial, ns_separable, ns_rvv, ns_sobel, ns_mag_l1, ns_mag_l2, ns_dir;
 
-    
+    // 1. Gaussian — spatial 2-D  (reference / slowest path)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gaussian_blur_5x5_spatial_2d(src, blurred);
+    t1 = get_ns();
+    ns_spatial = t1 - t0;
 
-    t0 = profiler_now();
-    for (int i = 0; i < ITERS; i++) {
+    // 2. Gaussian — separable 1-D  (scalar optimised)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
         gaussian_blur_5x5_separable_1d(src, blurred);
-    }
-    t1 = profiler_now();
-    ns_gaussian = t1 - t0;
+    t1 = get_ns();
+    ns_separable = t1 - t0;
 
-    
+    // 3. Gaussian — RVV  (intrinsic; falls back to separable on host)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gaussian_blur_5x5_rvv(src, blurred);
+    t1 = get_ns();
+    ns_rvv = t1 - t0;
 
-    t0 = profiler_now();
-    for (int i = 0; i < ITERS; i++) {
+    // Run separable once more to leave a realistic blurred image in `blurred`
+    // before the downstream stages are measured.
+    gaussian_blur_5x5_separable_1d(src, blurred);
+
+    // 4. Sobel Gx / Gy
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i) {
         const uint32_t Ww = blurred.width;
         const uint32_t Hh = blurred.height;
-        for (uint32_t y = 0; y < Hh; y++) {
-            for (uint32_t x = 0; x < Ww; x++) {
-                // border pixels: no 3x3 neighbourhood, just zero them out
+        for (uint32_t y = 0; y < Hh; ++y) {
+            for (uint32_t x = 0; x < Ww; ++x) {
                 if (x == 0 || x == Ww-1 || y == 0 || y == Hh-1) {
                     grad.gx[y*Ww+x] = 0;
                     grad.gy[y*Ww+x] = 0;
                     grad.magnitude[y*Ww+x] = 0;
                     continue;
                 }
-                // Gx kernel: detects vertical edges (left-right intensity change)
                 int16_t gx =
                     -1*(int16_t)blurred.pixels[(y-1)*Ww+(x-1)] +
                     +1*(int16_t)blurred.pixels[(y-1)*Ww+(x+1)] +
@@ -170,7 +252,6 @@ int main(int argc, char* argv[]) {
                     +2*(int16_t)blurred.pixels[(y  )*Ww+(x+1)] +
                     -1*(int16_t)blurred.pixels[(y+1)*Ww+(x-1)] +
                     +1*(int16_t)blurred.pixels[(y+1)*Ww+(x+1)];
-                // Gy kernel: detects horizontal edges (top-bottom intensity change)
                 int16_t gy =
                     -1*(int16_t)blurred.pixels[(y-1)*Ww+(x-1)] +
                     -2*(int16_t)blurred.pixels[(y-1)*Ww+(x  )] +
@@ -183,45 +264,78 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    t1 = profiler_now();
+    t1 = get_ns();
     ns_sobel = t1 - t0;
 
-    
-    t0 = profiler_now();
-    for (int i = 0; i < ITERS; i++) {
-        gradient_magnitude(grad.gx, grad.gy, mag_u8, (int)W, (int)H);
-    }
-    t1 = profiler_now();
-    ns_magnitude = t1 - t0;
+    // 5. Magnitude — L1  (|Gx| + |Gy|, integer, fast)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gradient_magnitude(grad.gx, grad.gy, mag_u8,
+                           static_cast<int>(W), static_cast<int>(H));
+    t1 = get_ns();
+    ns_mag_l1 = t1 - t0;
 
-   
+    // 6. Magnitude — L2  (Currently running scalar fallback until next commit)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gradient_magnitude(grad.gx, grad.gy, mag_u8,
+                           static_cast<int>(W), static_cast<int>(H));
+    t1 = get_ns();
+    ns_mag_l2 = t1 - t0;
 
-    t0 = profiler_now();
-    for (int i = 0; i < ITERS; i++) {
-        gradient_direction(grad.gx, grad.gy, dir, (int)W, (int)H);
-    }
-    t1 = profiler_now();
-    ns_direction = t1 - t0;
+    // 7. Direction — 4-bin quantisation
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gradient_direction(grad.gx, grad.gy, dir,
+                           static_cast<int>(W), static_cast<int>(H));
+    t1 = get_ns();
+    ns_dir = t1 - t0;
 
-    // --- print results -------------------------------------------------------
+    // ── Results ──────────────────────────────────────────────────────────────
 
-    uint64_t ns_total = ns_gaussian + ns_sobel + ns_magnitude + ns_direction;
-    double   total_d  = (double)ns_total;
+    const uint64_t ns_pipeline = ns_separable + ns_sobel + ns_mag_l1 + ns_dir;
+    const double   D = static_cast<double>(ns_pipeline);
 
+    std::printf("\n============================================================\n");
+    std::printf(" Standard pipeline  (separable Gaussian + L1 magnitude)\n");
+    std::printf("============================================================\n");
     print_header();
-    print_row("Gaussian 5x5",             ns_gaussian,  ITERS, 100.0*(double)ns_gaussian /total_d);
-    print_row("Sobel Gx/Gy",              ns_sobel,     ITERS, 100.0*(double)ns_sobel    /total_d);
-    print_row("Magnitude L1 (|Gx|+|Gy|)", ns_magnitude, ITERS, 100.0*(double)ns_magnitude/total_d);
-    print_row("Direction (4-bin)",         ns_direction, ITERS, 100.0*(double)ns_direction/total_d);
-    print_total(ns_total, ITERS);
+    print_row("Gaussian separable 1-D",      ns_separable, ITERS, 100.0*ns_separable/D);
+    print_row("Sobel Gx/Gy",                 ns_sobel,     ITERS, 100.0*ns_sobel    /D);
+    print_row("Magnitude L1 (|Gx|+|Gy|)",    ns_mag_l1,    ITERS, 100.0*ns_mag_l1   /D);
+    print_row("Direction (4-bin)",            ns_dir,       ITERS, 100.0*ns_dir      /D);
+    print_total(ns_pipeline, ITERS);
 
+    std::printf("\n============================================================\n");
+    std::printf(" Alternative / comparison stages\n");
+    std::printf("============================================================\n");
+    print_header();
+    print_row("Gaussian spatial 2-D  (ref)",  ns_spatial,   ITERS,
+              100.0 * static_cast<double>(ns_spatial)   / static_cast<double>(ns_separable));
+    print_row("Gaussian RVV          (vec)",  ns_rvv,       ITERS,
+              100.0 * static_cast<double>(ns_rvv)        / static_cast<double>(ns_separable));
+    print_row("Magnitude L2 (baseline ref)",  ns_mag_l2,    ITERS,
+              100.0 * static_cast<double>(ns_mag_l2)    / static_cast<double>(ns_mag_l1));
+    std::printf("  (share %% column = ratio vs the scalar baseline for that stage)\n");
 
-    // --- cleanup 
+    std::printf("\n============================================================\n");
+    std::printf(" Gaussian speedup summary\n");
+    std::printf("============================================================\n");
+    std::printf("  spatial_2d  / separable_1d  ratio: %.2fx  "
+                "(>1 means separable is faster)\n",
+                static_cast<double>(ns_spatial)   / static_cast<double>(ns_separable));
+    std::printf("  separable_1d / rvv           ratio: %.2fx  "
+                "(>1 means RVV is faster)\n",
+                static_cast<double>(ns_separable) / static_cast<double>(ns_rvv));
+    std::printf("  spatial_2d   / rvv           ratio: %.2fx\n",
+                static_cast<double>(ns_spatial)   / static_cast<double>(ns_rvv));
+
+    // ── Cleanup ──────────────────────────────────────────────────────────────
     image_free(src);
     image_free(blurred);
     gradient_free(grad);
-    free(mag_u8);
-    free(dir);
+    std::free(mag_u8);
+    std::free(dir);
 
     return 0;
 }

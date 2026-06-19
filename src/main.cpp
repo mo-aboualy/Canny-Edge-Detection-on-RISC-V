@@ -5,25 +5,31 @@
  * Consolidates the old benchmark.cpp and the old main.cpp into one file.
  *
  * Timer: get_ns() via Linux syscall 113 (clock_gettime / CLOCK_MONOTONIC).
- * This is the correct timer for QEMU user-mode because it measures
- * wall-clock time, not emulated cycle counts.  rdcycle is NOT used.
+ *        This is the correct timer for QEMU user-mode because it measures
+ *        wall-clock time, not emulated cycle counts.  rdcycle is NOT used.
  *
  * Build:
- * make run            (VLEN=128, default)
- * make run VLEN=256
- * make run VLEN=512
+ *   make run            (VLEN=128, default)
+ *   make run VLEN=256
+ *   make run VLEN=512
  *
  * Usage (optional args):
- * ./canny_rv [width height iters]
+ *   ./canny_rv [width height iters]
  */
 
 #include "image_io.h"
 #include "gaussian_blur.h"
 #include "sobel.h"
 #include "magnitude.h"
+#include "magnitude_rvv.h"
+#include "sobel_rvv.h"
+#include "magnitude_rvv.h"
+#include "sobel_rvv.h"
 #include "direction.h"
 #include "timer.h"         // get_ns() — CLOCK_MONOTONIC via ecall
 #include "gaussian_rvv.h"
+#include "sobel_rvv.h"
+
 
 #include <cstdio>
 #include <cstdlib>
@@ -205,7 +211,7 @@ int main(int argc, char* argv[]) {
     // ── Benchmarking ─────────────────────────────────────────────────────────
 
     uint64_t t0, t1;
-    uint64_t ns_spatial, ns_separable, ns_rvv, ns_sobel, ns_mag_l1, ns_mag_l2, ns_dir;
+    uint64_t ns_spatial, ns_separable, ns_rvv, ns_sobel, ns_sobel_rvv, ns_mag_l1, ns_mag_l1_rvv, ns_mag_l2, ns_dir;
 
     // 1. Gaussian — spatial 2-D  (reference / slowest path)
     t0 = get_ns();
@@ -233,8 +239,12 @@ int main(int argc, char* argv[]) {
     gaussian_blur_5x5_separable_1d(src, blurred);
 
     // 4. Sobel Gx / Gy
+    // We call sobel_3x3 which allocates internally; free and reuse each iter
+    // to avoid measuring accumulated heap growth.
     t0 = get_ns();
     for (int i = 0; i < ITERS; ++i) {
+        // Inline the kernel directly onto the pre-allocated grad buffers so
+        // the measurement is pure computation, not malloc/free.
         const uint32_t Ww = blurred.width;
         const uint32_t Hh = blurred.height;
         for (uint32_t y = 0; y < Hh; ++y) {
@@ -267,19 +277,37 @@ int main(int argc, char* argv[]) {
     t1 = get_ns();
     ns_sobel = t1 - t0;
 
+    // 4b. Sobel — RVV
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i) {
+        GradientImage tmp_g{};
+        sobel_3x3_rvv(blurred, tmp_g);
+        gradient_free(tmp_g);
+    }
+    t1 = get_ns();
+    ns_sobel_rvv = t1 - t0;
+
     // 5. Magnitude — L1  (|Gx| + |Gy|, integer, fast)
     t0 = get_ns();
     for (int i = 0; i < ITERS; ++i)
-        gradient_magnitude(grad.gx, grad.gy, mag_u8,
-                           static_cast<int>(W), static_cast<int>(H));
+        gradient_magnitude_l1(grad.gx, grad.gy, mag_u8,
+                              static_cast<int>(W), static_cast<int>(H));
     t1 = get_ns();
     ns_mag_l1 = t1 - t0;
 
-    // 6. Magnitude — L2  (Currently running scalar fallback until next commit)
+    // 5b. Magnitude — L1 RVV
     t0 = get_ns();
     for (int i = 0; i < ITERS; ++i)
-        gradient_magnitude(grad.gx, grad.gy, mag_u8,
-                           static_cast<int>(W), static_cast<int>(H));
+        gradient_magnitude_l1_rvv(grad.gx, grad.gy, mag_u8,
+                              static_cast<int>(W), static_cast<int>(H));
+    t1 = get_ns();
+    ns_mag_l1_rvv = t1 - t0;
+
+    // 6. Magnitude — L2  (sqrt(Gx²+Gy²), float, accurate)
+    t0 = get_ns();
+    for (int i = 0; i < ITERS; ++i)
+        gradient_magnitude_l2(grad.gx, grad.gy, mag_u8,
+                              static_cast<int>(W), static_cast<int>(H));
     t1 = get_ns();
     ns_mag_l2 = t1 - t0;
 
@@ -291,37 +319,42 @@ int main(int argc, char* argv[]) {
     t1 = get_ns();
     ns_dir = t1 - t0;
 
-    // ── Results ──────────────────────────────────────────────────────────────
+   // ── Results ──────────────────────────────────────────────────────────────
 
-    const uint64_t ns_pipeline = ns_separable + ns_sobel + ns_mag_l1 + ns_dir;
+    // Changed to use ns_spatial instead of ns_separable for the main pipeline
+    const uint64_t ns_pipeline = ns_spatial + ns_sobel + ns_mag_l1 + ns_dir;
     const double   D = static_cast<double>(ns_pipeline);
 
     std::printf("\n============================================================\n");
-    std::printf(" Standard pipeline  (separable Gaussian + L1 magnitude)\n");
+    std::printf(" Standard pipeline  (spatial 2-D Gaussian + L1 magnitude)\n");
     std::printf("============================================================\n");
     print_header();
-    print_row("Gaussian separable 1-D",      ns_separable, ITERS, 100.0*ns_separable/D);
+    print_row("Gaussian spatial 2-D",        ns_spatial,   ITERS, 100.0*ns_spatial  /D);
     print_row("Sobel Gx/Gy",                 ns_sobel,     ITERS, 100.0*ns_sobel    /D);
     print_row("Magnitude L1 (|Gx|+|Gy|)",    ns_mag_l1,    ITERS, 100.0*ns_mag_l1   /D);
-    print_row("Direction (4-bin)",            ns_dir,       ITERS, 100.0*ns_dir      /D);
+    print_row("Direction (4-bin)",           ns_dir,       ITERS, 100.0*ns_dir      /D);
     print_total(ns_pipeline, ITERS);
 
     std::printf("\n============================================================\n");
     std::printf(" Alternative / comparison stages\n");
     std::printf("============================================================\n");
     print_header();
-    print_row("Gaussian spatial 2-D  (ref)",  ns_spatial,   ITERS,
-              100.0 * static_cast<double>(ns_spatial)   / static_cast<double>(ns_separable));
+    print_row("Gaussian separable 1-D",       ns_separable, ITERS,
+              100.0 * static_cast<double>(ns_separable) / static_cast<double>(ns_spatial));
     print_row("Gaussian RVV          (vec)",  ns_rvv,       ITERS,
-              100.0 * static_cast<double>(ns_rvv)        / static_cast<double>(ns_separable));
+              100.0 * static_cast<double>(ns_rvv)       / static_cast<double>(ns_spatial));
+    print_row("Sobel RVV             (vec)",  ns_sobel_rvv,   ITERS,
+              100.0 * static_cast<double>(ns_sobel_rvv)   / static_cast<double>(ns_sobel));
+    print_row("Magnitude L1 RVV      (vec)",  ns_mag_l1_rvv, ITERS,
+              100.0 * static_cast<double>(ns_mag_l1_rvv)  / static_cast<double>(ns_mag_l1));
     print_row("Magnitude L2 (baseline ref)",  ns_mag_l2,    ITERS,
               100.0 * static_cast<double>(ns_mag_l2)    / static_cast<double>(ns_mag_l1));
-    std::printf("  (share %% column = ratio vs the scalar baseline for that stage)\n");
+    std::printf("  (share %% column = ratio vs the baseline for that stage)\n");
 
     std::printf("\n============================================================\n");
     std::printf(" Gaussian speedup summary\n");
     std::printf("============================================================\n");
-    std::printf("  spatial_2d  / separable_1d  ratio: %.2fx  "
+    std::printf("  spatial_2d   / separable_1d  ratio: %.2fx  "
                 "(>1 means separable is faster)\n",
                 static_cast<double>(ns_spatial)   / static_cast<double>(ns_separable));
     std::printf("  separable_1d / rvv           ratio: %.2fx  "

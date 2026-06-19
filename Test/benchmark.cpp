@@ -181,28 +181,28 @@ int main() {
     t1 = get_ns();
     unsigned long long t_direction = (t1 - t0) / ITERS;
 
-    // Print individual details to match prior formats
-    std::printf("1. Gaussian spatial 2D (Un-padded) : %llu ns/call\n", t_spatial);
-    std::printf("1b. Gaussian Pre-padded 2D         : %llu ns/call\n", t_padded);
-    std::printf("2. Gaussian separable 1D           : %llu ns/call\n", t_separable);
-    std::printf("3. Sobel 3x3                       : %llu ns/call\n", t_sobel);
-    std::printf("4. Magnitude L1                    : %llu ns/call\n", t_mag_l1);
-    std::printf("5. Magnitude L2                    : %llu ns/call\n", t_mag_l2);
-    std::printf("6. Direction                       : %llu ns/call\n", t_direction);
+// Print individual details to match prior formats
+    std::printf("1. Gaussian spatial 2D (Un-padded) : %.3f ms/call\n", static_cast<double>(t_spatial) / 1e6);
+    std::printf("1b. Gaussian Pre-padded 2D         : %.3f ms/call\n", static_cast<double>(t_padded) / 1e6);
+    std::printf("2. Gaussian separable 1D           : %.3f ms/call\n", static_cast<double>(t_separable) / 1e6);
+    std::printf("3. Sobel 3x3                       : %.3f ms/call\n", static_cast<double>(t_sobel) / 1e6);
+    std::printf("4. Magnitude L1                    : %.3f ms/call\n", static_cast<double>(t_mag_l1) / 1e6);
+    std::printf("5. Magnitude L2                    : %.3f ms/call\n", static_cast<double>(t_mag_l2) / 1e6);
+    std::printf("6. Direction                       : %.3f ms/call\n", static_cast<double>(t_direction) / 1e6);
 
     // Dynamic Matrix Generation
     std::printf("\n========================================================================\n");
     std::printf(" Live Profile Report (Current Target Optimization Profile)\n");
     std::printf("========================================================================\n");
-    std::printf("%-30s | Runtime (ns/call)\n", "Stage");
+    std::printf("%-30s | Runtime (ms/call)\n", "Stage");
     std::printf("------------------------------------------------------------------------\n");
-    std::printf("%-30s | %llu ns\n", "Gaussian spatial 2D (Un-padded)", t_spatial);
-    std::printf("%-30s | %llu ns\n", "Gaussian Pre-padded 2D", t_padded);
-    std::printf("%-30s | %llu ns\n", "Gaussian separable 1D", t_separable);
-    std::printf("%-30s | %llu ns\n", "Sobel 3x3", t_sobel);
-    std::printf("%-30s | %llu ns\n", "Magnitude L1", t_mag_l1);
-    std::printf("%-30s | %llu ns\n", "Magnitude L2", t_mag_l2);
-    std::printf("%-30s | %llu ns\n", "Direction", t_direction);
+    std::printf("%-30s | %8.3f ms\n", "Gaussian spatial 2D (Un-padded)", static_cast<double>(t_spatial) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Gaussian Pre-padded 2D", static_cast<double>(t_padded) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Gaussian separable 1D", static_cast<double>(t_separable) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Sobel 3x3", static_cast<double>(t_sobel) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Magnitude L1", static_cast<double>(t_mag_l1) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Magnitude L2", static_cast<double>(t_mag_l2) / 1e6);
+    std::printf("%-30s | %8.3f ms\n", "Direction", static_cast<double>(t_direction) / 1e6);
     std::printf("========================================================================\n");
 
     gradient_free(gradient);

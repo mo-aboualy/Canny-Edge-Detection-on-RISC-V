@@ -274,7 +274,7 @@ make visualize_rv     # RISC-V/QEMU build, swept across VLEN 128/256/512
 
 The image below shows every stage of the pipeline running end-to-end on a real 512×512 test photo, generated via `make visualize` (host build):
 
-![Canny pipeline stages — input through final edges](docs/pipeline_stages.jpeg)
+![Canny pipeline stages — input through final edges](readmepics/pipeline_stages.jpeg)
 
 | # | Stage | Status |
 |---|---|---|

@@ -32,11 +32,19 @@ def main():
     files = []
 
     # Parse arguments
+    # Track which numeric arg we're on by POSITION, not by comparing to the
+    # default value — otherwise a real width/height of 100 gets misread as
+    # "not yet set" and silently falls through to the wrong slot.
+    numbers_seen = 0
+
     for arg in args:
         if arg.isdigit():
-            # Assume first number is width, second is height
-            if width == 100 and arg != "100": width = int(arg)
-            else: height = int(arg)
+            if numbers_seen == 0:
+                width = int(arg)
+            elif numbers_seen == 1:
+                height = int(arg)
+            # else: ignore extra numeric args
+            numbers_seen += 1
         else:
             files.append(arg)
 

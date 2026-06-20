@@ -31,6 +31,16 @@ PIPELINE_SRCS := \
     src/nms.cpp \
     src/hysteresis.cpp
 
+.PHONY: pipeline_stages
+
+pipeline_stages: | $(BUILD_DIR_HOST)
+> $(HOST_CXX) $(HOST_FLAGS) \
+> 	Test/Test_pipeline_stages.cpp \
+> 	$(PIPELINE_SRCS) \
+> 	-o $(BUILD_DIR_HOST)/test_pipeline_stages \
+> 	-lm
+> ./$(BUILD_DIR_HOST)/test_pipeline_stages input_512.raw 512 512 Tool/stages 50 100
+
 PHASE4_SRC := Test/benchmark.cpp
 VEC_REPORT := $(BUILD_DIR_P4)/vec_report.txt
 

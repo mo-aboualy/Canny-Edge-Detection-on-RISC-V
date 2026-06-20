@@ -27,7 +27,19 @@ PIPELINE_SRCS := \
     src/sobel_rvv.cpp \
     src/magnitude.cpp \
     src/magnitude_rvv.cpp \
-    src/direction.cpp
+    src/direction.cpp \
+    src/nms.cpp \
+    src/hysteresis.cpp
+
+.PHONY: pipeline_stages
+
+pipeline_stages: | $(BUILD_DIR_HOST)
+> $(HOST_CXX) $(HOST_FLAGS) \
+> 	Test/Test_pipeline_stages.cpp \
+> 	$(PIPELINE_SRCS) \
+> 	-o $(BUILD_DIR_HOST)/test_pipeline_stages \
+> 	-lm
+> ./$(BUILD_DIR_HOST)/test_pipeline_stages input_512.raw 512 512 Tool/stages 50 100
 
 PHASE4_SRC := Test/benchmark.cpp
 VEC_REPORT := $(BUILD_DIR_P4)/vec_report.txt
@@ -42,7 +54,7 @@ $(BUILD_DIR_HOST) $(BUILD_DIR_RV) $(BUILD_DIR_P4) $(BUILD_DIR_VIZ):
 > @mkdir -p $@
 
 # --- Host-side Testing ---
-TEST_SRCS := src/host_tests.cpp $(filter-out src/gaussian_rvv.cpp src/sobel_rvv.cpp, $(PIPELINE_SRCS))
+TEST_SRCS := src/host_tests.cpp $(filter-out src/gaussian_rvv.cpp src/sobel_rvv.cpp src/magnitude_rvv.cpp, $(PIPELINE_SRCS)) src/nms.cpp src/hysteresis.cpp
 $(BUILD_DIR_HOST)/test_runner: $(TEST_SRCS) | $(BUILD_DIR_HOST)
 > @echo "[BUILD] Host Test Runner"
 > @$(HOST_CXX) $(HOST_FLAGS) $^ -o $@ $(HOST_LIBS)

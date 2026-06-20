@@ -4,8 +4,11 @@
 #include "sobel.h"
 #include "magnitude.h"
 #include "direction.h"
+#include "nms.h"
+#include "hysteresis.h"
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 
 static Image make_image(uint32_t w, uint32_t h, uint8_t fill) {
@@ -211,6 +214,102 @@ TEST(Direction, OutputValuesInRange) {
     gradient_direction(Gx, Gy, dir, 4, 1);
     for (int i = 0; i < 4; i++)
         EXPECT_LE(dir[i], 3);
+}
+
+// =============================================================================
+// BONUS: Non-Maximum Suppression Tests
+// =============================================================================
+
+TEST(NMS, BorderPixelsAreZero) {
+    uint8_t mag[16], dir[16], out[16];
+    for (int i = 0; i < 16; i++) { mag[i] = 100; dir[i] = 0; out[i] = 0; }
+    non_maximum_suppression(mag, dir, out, 4, 4);
+    for (int x = 0; x < 4; x++) {
+        EXPECT_EQ(out[0 * 4 + x], 0);
+        EXPECT_EQ(out[3 * 4 + x], 0);
+    }
+    for (int y = 0; y < 4; y++) {
+        EXPECT_EQ(out[y * 4 + 0], 0);
+        EXPECT_EQ(out[y * 4 + 3], 0);
+    }
+}
+
+TEST(NMS, LocalMaximumIsKept) {
+    // Centre pixel (1,1) is the max along direction 0 (horizontal)
+    uint8_t mag[9] = {0, 0, 0, 50, 200, 50, 0, 0, 0};
+    uint8_t dir[9] = {0, 0, 0,  0,   0,  0, 0, 0, 0};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 200);
+}
+
+TEST(NMS, NonMaximumIsSuppressed) {
+    // Centre (1,1)=100 is NOT the max along dir=0; right neighbour is 200
+    uint8_t mag[9] = {0,  0,   0, 50, 100, 200, 0, 0, 0};
+    uint8_t dir[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 0);
+}
+
+TEST(NMS, AllZeroInputGivesAllZeroOutput) {
+    uint8_t mag[9] = {}, dir[9] = {}, out[9];
+    std::memset(out, 99, 9);
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    for (int i = 0; i < 9; i++) EXPECT_EQ(out[i], 0);
+}
+
+TEST(NMS, Direction90VerticalSuppress) {
+    // Centre (1,1)=100, above (0,1)=200 → centre suppressed along dir=2
+    uint8_t mag[9] = {0, 200, 0, 0, 100, 0, 0, 50, 0};
+    uint8_t dir[9] = {2, 2, 2, 2, 2, 2, 2, 2, 2};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 0);
+}
+
+// =============================================================================
+// BONUS: Hysteresis Thresholding Tests
+// =============================================================================
+
+TEST(Hysteresis, StrongPixelAlwaysKept) {
+    uint8_t nms[9] = {0, 0, 0, 0, 200, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[4], 255);
+}
+
+TEST(Hysteresis, WeakPixelConnectedToStrongIsKept) {
+    // (0,1)=75 weak, (1,1)=200 strong — 8-connected to each other
+    uint8_t nms[9] = {0, 75, 0, 0, 200, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[1], 255); // weak promoted
+    EXPECT_EQ(out[4], 255); // strong kept
+}
+
+TEST(Hysteresis, IsolatedWeakPixelSuppressed) {
+    uint8_t nms[9] = {0, 0, 0, 0, 75, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[4], 0);
+}
+
+TEST(Hysteresis, BelowLowThresholdAlwaysSuppressed) {
+    uint8_t nms[9];
+    std::memset(nms, 20, 9); // all below low=50
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    for (int i = 0; i < 9; i++) EXPECT_EQ(out[i], 0);
+}
+
+TEST(Hysteresis, OutputOnlyContains0Or255) {
+    uint8_t nms[25];
+    for (int i = 0; i < 25; i++) nms[i] = (uint8_t)(i * 10);
+    uint8_t out[25] = {};
+    hysteresis_threshold(nms, out, 5, 5, 60, 120);
+    for (int i = 0; i < 25; i++)
+        EXPECT_TRUE(out[i] == 0 || out[i] == 255);
 }
 
 int main(int argc, char** argv) {

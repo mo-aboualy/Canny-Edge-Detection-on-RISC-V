@@ -274,7 +274,7 @@ make visualize_rv     # RISC-V/QEMU build, swept across VLEN 128/256/512
 
 The image below shows every stage of the pipeline running end-to-end on a real 512×512 test photo, generated via `make visualize` (host build):
 
-![Canny pipeline stages — input through final edges](readmepics/pipeline_stages.jpeg)
+![Canny pipeline stages — input through final edges](docs/pipeline_stages.jpeg)
 
 | # | Stage | Status |
 |---|---|---|
@@ -319,39 +319,41 @@ One QEMU-specific artifact worth flagging up front: **some stages get *slower* g
 
 > A critical Makefile bug was fixed before these numbers were collected: `RV_FLAGS` originally hardcoded `-O2`, which silently overrode every per-target optimization flag and made all six binaries behave identically. Each `phase4` target now supplies its own `-Ox` flag explicitly, and `RV_FLAGS` contains no optimization level at all.
 
+> **Toolchain note:** these numbers were collected after switching the cross-compiler from `riscv64-linux-gnu-g++` to `riscv64-unknown-elf-g++` (bare-metal Newlib), matching the project guide's specified toolchain. Absolute millisecond values differ from earlier internal test runs as a result of this switch (different C library, different codegen) — the *relative* patterns across optimization levels remain consistent.
+
 ### Raw results (512×512, 200 iterations/stage)
 
 | Stage | -O0 | -O2 | -O3 | -Os | -Ofast | -O3_vec |
 |---|---|---|---|---|---|---|
-| Gaussian spatial 2D (un-padded) | 102.91 ms | 43.57 ms | 13.30 ms | 49.72 ms | 13.17 ms | 13.73 ms |
-| Gaussian pre-padded 2D | 53.43 ms | 19.57 ms | 6.91 ms | 20.83 ms | 6.90 ms | 7.09 ms |
-| Gaussian separable 1D | 32.56 ms | 13.51 ms | 4.56 ms | 13.01 ms | 4.67 ms | 4.58 ms |
-| Sobel 3×3 | 70.17 ms | 20.34 ms | 19.66 ms | 55.84 ms | 23.81 ms | 20.06 ms |
-| Magnitude L1 | 61.14 ms | 4.36 ms | 4.11 ms | 5.01 ms | 4.07 ms | 4.09 ms |
-| Magnitude L2 (sqrt) | 49.15 ms | 39.51 ms | 39.47 ms | 47.68 ms | 11.01 ms | 39.82 ms |
-| Direction | 3.39 ms | 1.78 ms | 1.74 ms | 2.05 ms | 1.65 ms | 1.72 ms |
+| Gaussian spatial 2D (un-padded) | 67.140 ms | 30.696 ms | 10.021 ms | 28.319 ms | 10.107 ms | 10.454 ms |
+| Gaussian pre-padded 2D | 33.024 ms | 13.744 ms | 3.597 ms | 16.127 ms | 3.697 ms | 3.856 ms |
+| Gaussian separable 1D | 22.766 ms | 9.311 ms | 3.697 ms | 9.136 ms | 3.704 ms | 3.594 ms |
+| Sobel 3×3 | 51.394 ms | 13.365 ms | 12.707 ms | 40.344 ms | 16.198 ms | 12.731 ms |
+| Magnitude L1 | 27.080 ms | 1.982 ms | 1.941 ms | 2.492 ms | 1.864 ms | 1.914 ms |
+| Magnitude L2 (sqrt) | 35.068 ms | 24.842 ms | 23.888 ms | 33.965 ms | 7.924 ms | 23.935 ms |
+| Direction | 9.177 ms | 1.119 ms | 1.165 ms | 1.410 ms | 1.104 ms | 1.145 ms |
 
 ### Binary size (bytes)
 
 | O0 | O2 | O3 | Os | Ofast | O3_vec |
 |---|---|---|---|---|---|
-| 592,616 | 571,048 | 591,272 | 567,248 | 590,968 | 591,272 |
+| 879,808 | 849,448 | 873,776 | 849,816 | 873,472 | 873,776 |
 
-`-Os` produces the smallest binary, as expected (size is its explicit objective). `-O3` and `-O3_vec` are byte-identical in size — confirming that adding `-fopt-info-vec-all` only emits a *report*, it does not change codegen.
+`-Os` and `-O2` produce the smallest binaries, as expected (`-Os`'s explicit objective is size, and `-O2` avoids the more aggressive inlining of `-O3`). `-O3` and `-O3_vec` are byte-identical in size — confirming that adding `-fopt-info-vec-all` only emits a *report*, it does not change codegen.
 
 ### Reading the numbers: three separate findings
 
 **1. The un-padded vs. pre-padded vs. separable Gaussian comparison demonstrates a vectorization blocker.**
 
-The "un-padded" spatial 2D kernel has a boundary check (`if (yy>=0 && yy<height && ...)`) *inside* the innermost loop. The pre-padded version moves that check **outside** the timed loop by padding the image with zeros once, up front, so the inner 5×5 convolution loop has no conditional branches at all. At every optimization level, pre-padding alone roughly **halves** the runtime (e.g. 102.91 ms → 53.43 ms at `-O0`; 13.30 ms → 6.91 ms at `-O3`) with *zero* change to the math — purely because the compiler can now reorder/vectorize a branch-free loop. This is the practical demonstration the project guide calls for: control flow inside a loop is what blocks auto-vectorization, not the algorithm itself.
+The "un-padded" spatial 2D kernel has a boundary check (`if (yy>=0 && yy<height && ...)`) *inside* the innermost loop. The pre-padded version moves that check **outside** the timed loop by padding the image with zeros once, up front, so the inner 5×5 convolution loop has no conditional branches at all. At every optimization level, pre-padding alone roughly **halves to a third** the runtime (e.g. 67.140 ms → 33.024 ms at `-O0`, a 2.0× improvement; 10.021 ms → 3.597 ms at `-O3`, a 2.8× improvement) with *zero* change to the math — purely because the compiler can now reorder/vectorize a branch-free loop. This is the practical demonstration the project guide calls for: control flow inside a loop is what blocks auto-vectorization, not the algorithm itself.
 
 **2. Separable convolution wins independently of vectorization.**
 
-Separable 1D (horizontal pass + vertical pass, ~10 multiply-adds/pixel) beats spatial 2D (25 multiply-adds/pixel) by roughly the expected ~2.5–3× at every optimization level — this is an *algorithmic* win, not a compiler trick. At `-O3` it's 13.30 ms → 4.56 ms, a 2.9× speedup, consistent with the operation-count reduction.
+Separable 1D (horizontal pass + vertical pass, ~10 multiply-adds/pixel) beats spatial 2D (25 multiply-adds/pixel) by roughly 2.7×–3.3× at every optimization level — this is an *algorithmic* win, not a compiler trick. At `-O3` it's 10.021 ms → 3.697 ms, a 2.71× speedup, consistent with the operation-count reduction.
 
-**3. `-O3` is not strictly better than `-O2` once Magnitude L2 enters the picture.**
+**3. `-O3` is not strictly better than `-O2` once Sobel and Magnitude L2 enter the picture.**
 
-Magnitude L2 barely moves from `-O2` (39.51 ms) to `-O3` (39.47 ms) — the `sqrtf()` call inside the loop creates a true data dependency that auto-vectorization cannot break, so extra optimization passes have nothing to grab onto. It only drops sharply under `-Ofast` (11.01 ms) because `-ffast-math` permits the compiler to replace `sqrt()` with a fast reciprocal-square-root approximation, trading a small amount of numerical precision for real speed. This is the only stage where `-Ofast`'s relaxed floating-point rules — rather than vectorization — are doing the work.
+Sobel only improves marginally from `-O2` (13.365 ms) to `-O3` (12.707 ms), and Magnitude L2 shows the same pattern (24.842 ms → 23.888 ms) — the `sqrtf()` call inside Magnitude L2's loop creates a true data dependency that auto-vectorization cannot break, so extra optimization passes have little to grab onto. Magnitude L2 only drops sharply under `-Ofast` (7.924 ms, a 3.0× improvement over `-O3`) because `-ffast-math` permits the compiler to replace `sqrt()` with a fast reciprocal-square-root approximation, trading a small amount of numerical precision for real speed. This is the stage where `-Ofast`'s relaxed floating-point rules — rather than vectorization — are doing the work. Notably, `-Os` is markedly *worse* than `-O2`/`-O3` for Sobel (40.344 ms vs ~13 ms) — optimizing for binary size actively works against this particular loop's performance.
 
 ### Auto-vectorization evidence (`-O3_vec` report)
 
@@ -365,34 +367,36 @@ The successful vectorization hits in the report are concentrated in `timer.h`, `
 
 ## Phase 5 — Profiling & Hotspot Identification
 
-**Goal:** measure the *relative* cost of each pipeline stage to decide where RVV effort should go — per Amdahl's Law, optimizing a stage that's only 7% of total time can't yield more than a 7% overall speedup no matter how fast you make it.
+**Goal:** measure the *relative* cost of each pipeline stage to decide where RVV effort should go — per Amdahl's Law, optimizing a stage that's only a small fraction of total time can't yield more than that fraction's worth of overall speedup no matter how fast you make it.
 
-### Standard pipeline breakdown (VLEN=128, separable Gaussian + L1 magnitude, 100 iterations)
+### Standard pipeline breakdown (VLEN=128, spatial 2D Gaussian + L1 magnitude, 100 iterations)
+
+> **Note:** `main.cpp`'s standard pipeline path uses the **spatial 2D Gaussian** kernel, not the separable variant — confirmed directly in the source (`ns_pipeline = ns_spatial + ns_sobel + ns_mag_l1 + ns_dir`). The breakdown below reflects that as-built behavior.
 
 | Stage | avg ms/call | Share of pipeline |
 |---|---|---|
-| Gaussian separable 1-D | 14.220 ms | 56.0% |
-| Sobel Gx/Gy | 5.151 ms | 20.3% |
-| Magnitude L1 (\|Gx\|+\|Gy\|) | 4.316 ms | 17.0% |
-| Direction (4-bin) | 1.687 ms | 6.6% |
-| **TOTAL** | **25.374 ms** | **100.0%** |
+| Gaussian spatial 2-D | 36.154 ms | 68.4% |
+| Sobel Gx/Gy | 13.584 ms | 25.7% |
+| Magnitude L1 (\|Gx\|+\|Gy\|) | 1.943 ms | 3.7% |
+| Direction (4-bin) | 1.156 ms | 2.2% |
+| **TOTAL** | **52.838 ms** | **100.0%** |
 
 ### Why this drove the Phase 6 priority order
 
-Gaussian and Sobel together account for **76.3%** of total pipeline time. Direction sits at 6.6% — even a hypothetical *infinitely fast* RVV direction kernel could only ever shave 6.6% off the total runtime, so per the project guide's explicit instruction ("optimize only the stages the profiling data identifies as hot"), **Direction is intentionally left scalar**. The vectorization order chosen was:
+Gaussian and Sobel together account for **94.1%** of total pipeline time — an even more lopsided distribution than a separable-Gaussian pipeline would show, because spatial 2D Gaussian is the more expensive of the two Gaussian implementations (per Phase 4, roughly 2.7–3.3× slower than separable). Direction sits at just 2.2% — even a hypothetical *infinitely fast* RVV direction kernel could only ever shave 2.2% off the total runtime, so per the project guide's explicit instruction ("optimize only the stages the profiling data identifies as hot"), **Direction is intentionally left scalar**. The vectorization order chosen was:
 
-1. **Gaussian** (56.0%) — highest-impact target, tackled first
-2. **Sobel** (20.3%) — second-highest, next in line
-3. **Magnitude L1** (17.0%) — third
-4. **Direction** (6.6%) — stays scalar, by design and by Amdahl's Law
+1. **Gaussian** (68.4%) — by far the highest-impact target, tackled first
+2. **Sobel** (25.7%) — second-highest, next in line
+3. **Magnitude L1** (3.7%) — third, despite its small share, since an RVV implementation was already in scope from earlier project planning
+4. **Direction** (2.2%) — stays scalar, by design and by Amdahl's Law
 
 ### Reference comparison stages (not in the standard pipeline path)
 
 | Stage | avg ms/call | Note |
 |---|---|---|
-| Gaussian spatial 2D | 44.871 ms | 3.16× slower than separable — confirms the Phase 4 finding inside the full pipeline context |
-| Gaussian RVV (Phase 6 draft) | 82.029 ms | Slower than scalar separable at VLEN=128 — discussed in Phase 6 below |
-| Magnitude L2 (sqrt) | 40.299 ms | 9.3× slower than L1 — confirms why L1 is the pipeline default |
+| Gaussian separable 1-D | 9.084 ms | 3.98× faster than spatial 2D — confirms the Phase 4 finding inside the full pipeline context |
+| Gaussian RVV (vec) | 61.215 ms | Slower than both scalar variants at VLEN=128 — discussed in Phase 6 below |
+| Magnitude L2 (sqrt) | 26.164 ms | ~13.5× slower than L1 — confirms why L1 is the pipeline default |
 
 ---
 
@@ -445,47 +449,49 @@ Per the guide's explicit requirement, the RVV kernel must produce **identical ou
 
 All three VLEN values pass with **zero** pixel difference. This confirms `vsetvl` — not a compile-time constant — is what's controlling strip width throughout the kernel; nothing in the implementation hardcodes an assumption about vector register width.
 
-### Full pipeline timing at each VLEN (standard pipeline path, separable Gaussian + L1 magnitude)
+### Full pipeline timing at each VLEN (standard pipeline path, spatial 2D Gaussian + L1 magnitude)
 
-| VLEN | Gaussian sep. 1-D | Sobel Gx/Gy | Magnitude L1 | Direction | **Total** |
+> As established in Phase 5, `main.cpp`'s standard pipeline path runs the **spatial 2D** Gaussian kernel, not separable. The table below reflects that.
+
+| VLEN | Gaussian spatial 2-D | Sobel Gx/Gy | Magnitude L1 | Direction | **Total** |
 |---|---|---|---|---|---|
-| 128 | 14.220 ms (56.0%) | 5.151 ms (20.3%) | 4.316 ms (17.0%) | 1.687 ms (6.6%) | **25.374 ms** |
-| 256 | 13.129 ms (54.7%) | 4.953 ms (20.6%) | 4.229 ms (17.6%) | 1.676 ms (7.0%) | **23.986 ms** |
-| 512 | 13.287 ms (55.0%) | 4.921 ms (20.4%) | 4.241 ms (17.5%) | 1.723 ms (7.1%) | **24.172 ms** |
+| 128 | 36.154 ms (68.4%) | 13.584 ms (25.7%) | 1.943 ms (3.7%) | 1.156 ms (2.2%) | **52.838 ms** |
+| 256 | 37.244 ms (69.0%) | 13.620 ms (25.2%) | 2.061 ms (3.8%) | 1.090 ms (2.0%) | **54.015 ms** |
+| 512 | 36.113 ms (68.3%) | 13.514 ms (25.6%) | 2.073 ms (3.9%) | 1.141 ms (2.2%) | **52.841 ms** |
 
-The standard pipeline path (scalar separable Gaussian + L1 magnitude) is stable across VLEN, as expected — it isn't vectorized, so VLEN shouldn't affect it, and the small ~1 ms fluctuations are QEMU scheduling noise, not a real effect.
+The standard pipeline path (scalar spatial 2D Gaussian + L1 magnitude) is stable across VLEN, as expected — none of these four stages in this particular path are vectorized, so VLEN shouldn't affect them, and the small fluctuations (≤2%) are QEMU scheduling noise, not a real effect.
 
 ### Gaussian RVV vs. scalar, across VLEN
 
-| VLEN | Gaussian spatial 2D (scalar ref) | Gaussian RVV |
-|---|---|---|
-| 128 | 44.871 ms | 82.029 ms |
-| 256 | 42.789 ms | 56.869 ms |
-| 512 | 43.007 ms | 43.737 ms |
+| VLEN | Gaussian spatial 2D (scalar ref) | Gaussian separable 1-D (scalar) | Gaussian RVV |
+|---|---|---|---|
+| 128 | 36.154 ms | 9.084 ms | 61.215 ms |
+| 256 | 37.244 ms | 9.386 ms | 40.743 ms |
+| 512 | 36.113 ms | 10.013 ms | 31.004 ms |
 
-**The headline finding of this section:** at VLEN=128, the hand-written RVV Gaussian kernel is **slower** than even the unoptimized scalar spatial-2D reference (0.55× the speed). It only catches up to scalar parity at VLEN=512 (0.98×). This is a direct, measured demonstration of QEMU's **per-instruction emulation overhead**: RVV instructions are expensive to emulate in QEMU user-mode, so at small VLEN — where the vector unit processes few elements per instruction — the *fixed* emulation cost per `vle`/`vwmaccu`/`vnclipu` call dominates over the *real* work being done per instruction. As VLEN grows, each vector instruction does proportionally more useful work per unit of emulation overhead, so the RVV path's relative standing improves steadily. On real hardware, where vector instruction throughput isn't artificially taxed by interpretation, this curve would be expected to look very different — RVV should win convincingly even at VLEN=128. This is the single most important thing to communicate honestly in the presentation: **the RVV numbers measured here characterize QEMU's interpreter cost, not real silicon performance.**
+**The headline finding of this section:** at VLEN=128, the hand-written RVV Gaussian kernel is **slower** than even the scalar spatial-2D reference (0.59× the speed) — and dramatically slower than the scalar separable reference (0.15× the speed). RVV performance improves steadily as VLEN increases, overtaking spatial 2D scalar only at VLEN=512 (1.16×), but it still never approaches the separable scalar baseline at any VLEN tested. This is a direct, measured demonstration of QEMU's **per-instruction emulation overhead**: RVV instructions are expensive to emulate in QEMU user-mode, so at small VLEN — where the vector unit processes few elements per instruction — the *fixed* emulation cost per `vle`/`vwmaccu`/`vnclipu` call dominates over the *real* work being done per instruction. As VLEN grows, each vector instruction does proportionally more useful work per unit of emulation overhead, so the RVV path's relative standing improves steadily. On real hardware, where vector instruction throughput isn't artificially taxed by interpretation, this curve would be expected to look very different — RVV should win convincingly even at VLEN=128. This is the single most important thing to communicate honestly in the presentation: **the RVV numbers measured here characterize QEMU's interpreter cost, not real silicon performance.**
 
 ### Gaussian, Sobel, and Magnitude L1 — RVV vs. scalar baseline, all VLEN (full sweep)
 
-| Stage | Scalar baseline | RVV VLEN=128 | RVV VLEN=256 | RVV VLEN=512 |
+| Stage | Scalar baseline (spatial 2D pipeline) | RVV VLEN=128 | RVV VLEN=256 | RVV VLEN=512 |
 |---|---|---|---|---|
-| Gaussian spatial 2D | 45.4 ms | 85.1 ms (0.53×) | 63.9 ms (0.78×) | 47.4 ms (0.98×) |
-| Sobel Gx/Gy | 5.2 ms | 34.1 ms (0.15×) | 31.1 ms (0.17×) | 26.0 ms (0.20×) |
-| Magnitude L1 | 4.6 ms | 16.2 ms (0.28×) | 12.8 ms (0.36×) | 9.1 ms (0.50×) |
+| Gaussian spatial 2D | 36.154 ms | 61.215 ms (0.59×) | 40.743 ms (0.91×) | 31.004 ms (1.16×) |
+| Sobel Gx/Gy | 13.584 ms | 20.232 ms (0.67×) | 18.230 ms (0.75×) | 16.381 ms (0.83×) |
+| Magnitude L1 | 1.943 ms | 9.576 ms (0.20×) | 6.297 ms (0.31×) | 4.222 ms (0.46×) |
 
-This table makes the QEMU-overhead pattern unmistakable across **every** vectorized stage, not just Gaussian: Sobel RVV is the most dramatic case, running at only **0.15–0.20×** scalar speed across the full VLEN range — it never reaches parity, let alone a speedup, under emulation. Magnitude L1 shows the same monotonic-improvement-with-VLEN shape as Gaussian (0.28× → 0.50×), trending toward parity but not reaching it at VLEN=512 either.
+This table makes the QEMU-overhead pattern unmistakable across **every** vectorized stage, not just Gaussian: Magnitude L1 RVV is the most dramatic case relative to its own baseline, running at only **0.20–0.46×** scalar speed across the full VLEN range — closing the gap substantially but not reaching parity even at VLEN=512. Sobel RVV shows the same trend (0.67× → 0.83×), approaching but not reaching parity. Gaussian RVV is the only one of the three to actually overtake its scalar baseline, and only at VLEN=512.
 
-The consistent pattern across all three independently-implemented kernels — RVV starts well behind scalar at VLEN=128 and steadily closes the gap as VLEN increases — is strong evidence this is a property of **QEMU's emulation cost model**, not a bug isolated to one kernel. A bug would be expected to show up inconsistently (e.g., correct on Gaussian, broken on Sobel); instead all three stages independently exhibit the exact shape predicted by "fixed per-vector-instruction emulation overhead amortized over more elements as VLEN grows." Correctness on all three kernels is independently verified bit-exact (Section 6.3 for Gaussian; `phase6_magnitude` for Magnitude L1) — these are real, working RVV implementations whose *performance* is bottlenecked by the emulator, not by incorrect vectorization.
+The consistent pattern across all three independently-implemented kernels — RVV starts behind scalar at VLEN=128 and steadily closes the gap as VLEN increases — is strong evidence this is a property of **QEMU's emulation cost model**, not a bug isolated to one kernel. A bug would be expected to show up inconsistently (e.g., correct on Gaussian, broken on Sobel); instead all three stages independently exhibit the exact shape predicted by "fixed per-vector-instruction emulation overhead amortized over more elements as VLEN grows." Correctness on all three kernels is independently verified bit-exact (Section 6.3 for Gaussian; `phase6_magnitude` for Magnitude L1) — these are real, working RVV implementations whose *performance* is bottlenecked by the emulator, not by incorrect vectorization.
 
 ### Gaussian speedup summary (ratio tables, >1 = left side faster)
 
 | VLEN | spatial_2d / separable_1d | separable_1d / RVV | spatial_2d / RVV |
 |---|---|---|---|
-| 128 | 3.16× | 0.17× | 0.55× |
-| 256 | 3.26× | 0.23× | 0.75× |
-| 512 | 3.24× | 0.30× | 0.98× |
+| 128 | 3.98× | 0.15× | 0.59× |
+| 256 | 3.97× | 0.23× | 0.91× |
+| 512 | 3.61× | 0.32× | 1.16× |
 
-The `spatial_2d / separable_1d` ratio staying flat (~3.2×) across all three VLEN values is itself a sanity check: that ratio compares two *scalar* implementations, so it should be completely insensitive to VLEN — and it is, confirming the benchmark harness isn't leaking VLEN-dependent effects into the scalar baselines.
+The `spatial_2d / separable_1d` ratio staying roughly flat (3.6×–4.0×) across all three VLEN values is itself a sanity check: that ratio compares two *scalar* implementations, so it should be completely insensitive to VLEN — and it is (within QEMU scheduling noise), confirming the benchmark harness isn't leaking VLEN-dependent effects into the scalar baselines. Note that RVV crosses parity with the *spatial* 2D baseline at VLEN=512 (1.16×) but never approaches the much faster *separable* baseline (0.32× even at VLEN=512) — the practical takeaway being that on this QEMU setup, scalar separable convolution remains the fastest available Gaussian implementation at every VLEN tested.
 
 ### 6.4 LMUL Sweep (register-pressure tradeoff)
 
@@ -493,13 +499,13 @@ The guide predicts a non-monotonic curve: LMUL=2 should beat LMUL=1 (more elemen
 
 | VLEN | LMUL=1 | LMUL=2 | LMUL=4 |
 |---|---|---|---|
-| 128 | 94.47 ms | 58.39 ms | 59.36 ms |
-| 256 | 57.46 ms | 44.48 ms | 44.19 ms |
-| 512 | 42.18 ms | 36.43 ms | 36.85 ms |
+| 128 | 56.68 ms | 38.90 ms | 40.37 ms |
+| 256 | 41.51 ms | 30.50 ms | 31.93 ms |
+| 512 | 29.88 ms | 26.71 ms | 26.34 ms |
 
 **Correctness:** all three LMUL settings produced `max|diff| = 0` against the scalar spatial-2D reference at every VLEN tested — register grouping changes performance, never numerical results, as expected.
 
-**Reading the curve:** LMUL=1 → LMUL=2 is a large, consistent win at every VLEN (e.g. 94.5 ms → 58.4 ms at VLEN=128, a 1.62× speedup) — more work per vector instruction directly reduces the number of instructions QEMU has to emulate. LMUL=2 → LMUL=4, however, is flat-to-slightly-worse at every VLEN (58.4 ms → 59.4 ms at VLEN=128; 44.5 ms → 44.2 ms at VLEN=256, statistically a wash; 36.4 ms → 36.8 ms at VLEN=512). This matches the guide's predicted "sweet spot" pattern — and lines up directly with the disclosed `lmul4` implementation caveat above: since the "LMUL=4" path is internally executing two `m2`-sized halves rather than one true `m4` operation, it isn't actually getting the register-grouping benefit LMUL=4 is supposed to provide, so seeing it underperform true LMUL=2 (rather than just plateauing) is consistent with that known implementation gap rather than a separate, unexplained result.
+**Reading the curve:** LMUL=1 → LMUL=2 is a large, consistent win at every VLEN (e.g. 56.68 ms → 38.90 ms at VLEN=128, a 1.46× speedup) — more work per vector instruction directly reduces the number of instructions QEMU has to emulate. LMUL=2 → LMUL=4, however, is flat-to-slightly-worse at every VLEN (38.90 ms → 40.37 ms at VLEN=128; 30.50 ms → 31.93 ms at VLEN=256; 26.71 ms → 26.34 ms at VLEN=512, a statistical wash). This matches the guide's predicted "sweet spot" pattern — and lines up directly with the disclosed `lmul4` implementation caveat above: since the "LMUL=4" path is internally executing two `m2`-sized halves rather than one true `m4` operation, it isn't actually getting the register-grouping benefit LMUL=4 is supposed to provide, so seeing it underperform or merely match true LMUL=2 (rather than clearly improving on it) is consistent with that known implementation gap rather than a separate, unexplained result.
 
 ---
 
@@ -509,12 +515,12 @@ Per the report template required by the project guide (Phase 7.1), consolidated 
 
 | Stage | -O0 | -O2 | -O3 | Auto-vec (-O3_vec) | RVV 128 | RVV 256 | RVV 512 |
 |---|---|---|---|---|---|---|---|
-| Gaussian (spatial 2D, un-padded) | 102.91 ms | 43.57 ms | 13.30 ms | 13.73 ms | 85.1 ms | 63.9 ms | 47.4 ms |
-| Gaussian (separable 1D, scalar) | 32.56 ms | 13.51 ms | 4.56 ms | 4.58 ms | n/a* | n/a* | n/a* |
-| Sobel Gx/Gy | 70.17 ms | 20.34 ms | 19.66 ms | 20.06 ms | 34.1 ms | 31.1 ms | 26.0 ms |
-| Magnitude L1 | 61.14 ms | 4.36 ms | 4.11 ms | 4.09 ms | 16.2 ms | 12.8 ms | 9.1 ms |
-| Direction | 3.39 ms | 1.78 ms | 1.74 ms | 1.72 ms | scalar | scalar | scalar |
-| Binary size | 592,616 B | 571,048 B | 591,272 B | 591,272 B | — | — | — |
+| Gaussian (spatial 2D, un-padded) | 67.140 ms | 30.696 ms | 10.021 ms | 10.454 ms | 61.215 ms | 40.743 ms | 31.004 ms |
+| Gaussian (separable 1D, scalar) | 22.766 ms | 9.311 ms | 3.697 ms | 3.594 ms | n/a* | n/a* | n/a* |
+| Sobel Gx/Gy | 51.394 ms | 13.365 ms | 12.707 ms | 12.731 ms | 20.232 ms | 18.230 ms | 16.381 ms |
+| Magnitude L1 | 27.080 ms | 1.982 ms | 1.941 ms | 1.914 ms | 9.576 ms | 6.297 ms | 4.222 ms |
+| Direction | 9.177 ms | 1.119 ms | 1.165 ms | 1.145 ms | scalar | scalar | scalar |
+| Binary size | 879,808 B | 849,448 B | 873,776 B | 873,776 B | — | — | — |
 
 \* The separable-1D path has no dedicated RVV benchmark column of its own — the RVV kernel was benchmarked against the spatial-2D reference, even though it *implements* separable convolution internally. Equivalence between RVV output and the scalar separable reference is confirmed bit-exact (Section 6.3) but a separable-vs-separable-RVV timing column was not separately collected.
 
@@ -522,11 +528,12 @@ Per the report template required by the project guide (Phase 7.1), consolidated 
 
 ## Conclusions
 
-- **Algorithm beats compiler beats hardware, in that order, for this codebase.** Switching from spatial 2D to separable Gaussian convolution (an algorithmic change) bought a steady ~3× speedup at every optimization level — bigger than any single compiler flag did on its own.
-- **Removing boundary checks is the single highest-leverage compiler-facing change available.** Pre-padding to eliminate the boundary `if` roughly halved Gaussian runtime at every optimization level, for free, with no semantic change.
-- **Profiling before optimizing paid off exactly as Amdahl's Law predicts.** Gaussian + Sobel = 76.3% of pipeline time; vectorizing them first, and leaving Direction (6.6%) scalar, was the correct call before any RVV code was written.
+- **Algorithm beats compiler beats hardware, in that order, for this codebase.** Switching from spatial 2D to separable Gaussian convolution (an algorithmic change) bought a roughly 2.7×–4× speedup at every optimization level — bigger than any single compiler flag did on its own.
+- **Removing boundary checks is the single highest-leverage compiler-facing change available.** Pre-padding to eliminate the boundary `if` cut Gaussian runtime by roughly half to nearly a third at every optimization level, for free, with no semantic change.
+- **Profiling before optimizing paid off exactly as Amdahl's Law predicts.** In the pipeline's as-built configuration (spatial 2D Gaussian), Gaussian + Sobel account for **94.1%** of total pipeline time; vectorizing them first, and leaving Direction (2.2%) scalar, was the correct call before any RVV code was written.
 - **Correctness was verified before performance was trusted, at every stage.** All three RVV kernels (Gaussian, Sobel, Magnitude L1) match their scalar references bit-for-bit at VLEN=128/256/512, satisfying the project's vector-length-agnostic correctness requirement — independent of whether the RVV kernels are currently *faster* than scalar under QEMU.
-- **QEMU's emulation model materially shapes what these numbers mean.** RVV running slower than scalar at low VLEN, across all three vectorized stages, is the most important caveat in this entire report: it is very likely an artifact of the emulator's flat per-instruction interpretation cost, not of the RVV implementations themselves, and should be presented as such rather than as a finished performance conclusion about real RISC-V hardware.
+- **QEMU's emulation model materially shapes what these numbers mean.** RVV trailing scalar at low VLEN, across all three vectorized stages, is the most important caveat in this entire report: it is very likely an artifact of the emulator's flat per-instruction interpretation cost, not of the RVV implementations themselves, and should be presented as such rather than as a finished performance conclusion about real RISC-V hardware. Gaussian RVV does cross over to a real (if modest) speedup at VLEN=512 against the spatial-2D baseline (1.16×) — the closest any RVV kernel gets to clearly beating scalar in this report — while Sobel and Magnitude L1 RVV remain behind scalar at every VLEN tested.
+- **The fastest path through this pipeline, as measured, is still scalar separable Gaussian — not RVV.** At every VLEN tested, scalar separable convolution (9.08–10.01 ms) outperforms both scalar spatial 2D (36.1–37.2 ms) and RVV Gaussian (31.0–61.2 ms). This doesn't undermine the RVV work — correctness and VLA-agnosticism are independently verified — but it's an honest, presentable finding: under QEMU emulation specifically, the best-performing *algorithmic* choice (separable convolution) currently beats the best-performing *vectorized* choice (RVV), which is a useful, real lesson about where optimization effort pays off fastest at this stage of the pipeline's development.
 
 ---
 

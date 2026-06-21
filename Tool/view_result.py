@@ -57,14 +57,25 @@ def main():
     files = []
 
     # Parse arguments.
-    # Distinguishes numeric arguments (treated as width/height) from
-    # non-numeric arguments (treated as filenames), so the script accepts
-    # files and dimensions in any order on the command line.
+    # Track which numeric arg we're on by POSITION (numbers_seen), not by
+    # comparing the value to the default. The original approach compared
+    # against the default (e.g. "if width == 100") to decide whether
+    # width had already been set -- but that breaks the moment someone's
+    # REAL width or height is also 100: a width of 100 would be silently
+    # mistaken for "not yet set" and the second 100 would land in the
+    # wrong slot. Counting numeric args by position avoids that entirely:
+    # the 1st digit-only arg is always width, the 2nd is always height,
+    # no matter what their actual values are.
+    numbers_seen = 0
+
     for arg in args:
         if arg.isdigit():
-            # Assume first number is width, second is height.
-            if width == 100 and arg != "100": width = int(arg)
-            else: height = int(arg)
+            if numbers_seen == 0:
+                width = int(arg)
+            elif numbers_seen == 1:
+                height = int(arg)
+            # else: ignore any extra numeric args beyond width/height
+            numbers_seen += 1
         else:
             files.append(arg)
 

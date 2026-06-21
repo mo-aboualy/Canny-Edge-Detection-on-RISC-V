@@ -1,25 +1,14 @@
-/**
- * @file host_tests.cpp
- * @brief Phase 3: GoogleTest unit test suite for the scalar baseline pipeline.
- *
- * Unlike Verify_io.cpp / Test_blur.cpp / Test_sobel.cpp (which are MANUAL,
- * visual sanity checks you run by eye), this file is the AUTOMATED test
- * suite. It runs natively on the host (g++, no QEMU) for fast iteration,
- * and is the safety net for everything that comes after: if these tests
- * pass, we have a trusted scalar reference to compare the RVV-vectorized
- * code against in Phase 6.
- *
- * Run with: make test
- */
-
 #include <gtest/gtest.h>
 #include "image_io.h"
 #include "gaussian_blur.h"
 #include "sobel.h"
 #include "magnitude.h"
 #include "direction.h"
+#include "nms.h"
+#include "hysteresis.h"
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 
 // ================================================================
@@ -351,6 +340,141 @@ TEST(Direction, OutputValuesInRange) {
     gradient_direction(Gx, Gy, dir, 4, 1);
     for (int i = 0; i < 4; i++)
         EXPECT_LE(dir[i], 3);
+}
+
+// =============================================================================
+// BONUS: Non-Maximum Suppression Tests
+// =============================================================================
+// NMS thins out the gradient magnitude image: for each pixel, it looks at
+// its two neighbors along the gradient DIRECTION and keeps the pixel only
+// if it's the local maximum along that line; otherwise it's suppressed to 0.
+// This is what turns "thick" Sobel edges into thin, single-pixel-wide lines.
+
+// Same border contract as Sobel: the outer 1px ring has no complete
+// neighborhood to compare against, so it's forced to zero.
+TEST(NMS, BorderPixelsAreZero) {
+    uint8_t mag[16], dir[16], out[16];
+    for (int i = 0; i < 16; i++) { mag[i] = 100; dir[i] = 0; out[i] = 0; }
+    non_maximum_suppression(mag, dir, out, 4, 4);
+    for (int x = 0; x < 4; x++) {
+        EXPECT_EQ(out[0 * 4 + x], 0);
+        EXPECT_EQ(out[3 * 4 + x], 0);
+    }
+    for (int y = 0; y < 4; y++) {
+        EXPECT_EQ(out[y * 4 + 0], 0);
+        EXPECT_EQ(out[y * 4 + 3], 0);
+    }
+}
+
+// Centre pixel (1,1) is the brightest along direction 0 (horizontal,
+// comparing left/right neighbors) -- it should survive suppression
+// unchanged.
+TEST(NMS, LocalMaximumIsKept) {
+    uint8_t mag[9] = {0, 0, 0, 50, 200, 50, 0, 0, 0};
+    uint8_t dir[9] = {0, 0, 0,  0,   0,  0, 0, 0, 0};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 200);
+}
+
+// Centre (1,1)=100 is NOT the local max along dir=0 -- its right
+// neighbor (200) is brighter, so the centre pixel must be suppressed
+// to 0 even though its own value is nonzero.
+TEST(NMS, NonMaximumIsSuppressed) {
+    uint8_t mag[9] = {0,  0,   0, 50, 100, 200, 0, 0, 0};
+    uint8_t dir[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 0);
+}
+
+// All-zero magnitude input should produce all-zero output. out[] is
+// deliberately pre-filled with 99 to prove the function actually writes
+// zeros rather than the test passing by accident.
+TEST(NMS, AllZeroInputGivesAllZeroOutput) {
+    uint8_t mag[9] = {}, dir[9] = {}, out[9];
+    std::memset(out, 99, 9);
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    for (int i = 0; i < 9; i++) EXPECT_EQ(out[i], 0);
+}
+
+// Same suppression logic, but for direction bin 2 (90 degrees/vertical):
+// compares the pixel above/below instead of left/right. Centre (1,1)=100
+// is weaker than the pixel directly above it (200), so it gets
+// suppressed. This confirms NMS actually reads the direction value and
+// switches comparison axis accordingly, instead of always comparing
+// horizontally.
+TEST(NMS, Direction90VerticalSuppress) {
+    uint8_t mag[9] = {0, 200, 0, 0, 100, 0, 0, 50, 0};
+    uint8_t dir[9] = {2, 2, 2, 2, 2, 2, 2, 2, 2};
+    uint8_t out[9] = {};
+    non_maximum_suppression(mag, dir, out, 3, 3);
+    EXPECT_EQ(out[4], 0);
+}
+
+// =============================================================================
+// BONUS: Hysteresis Thresholding Tests
+// =============================================================================
+// Hysteresis is the final Canny stage: classifies each NMS pixel as strong
+// (above high threshold, always kept), weak (between low and high,
+// kept only if connected to a strong pixel), or suppressed (below low,
+// always dropped). The output is binary -- every pixel becomes either
+// 0 or 255, no in-between values survive.
+
+// A pixel above the high threshold (200 > 100) must always be promoted
+// to a strong edge (255), regardless of its neighbors.
+TEST(Hysteresis, StrongPixelAlwaysKept) {
+    uint8_t nms[9] = {0, 0, 0, 0, 200, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[4], 255);
+}
+
+// (0,1)=75 is a "weak" pixel (between low=50 and high=100) sitting
+// 8-connected (diagonally adjacent counts) next to (1,1)=200, a strong
+// pixel. The weak pixel should be promoted to 255 because it's connected
+// to a confirmed strong edge -- this is the defining behavior of
+// hysteresis versus simple thresholding.
+TEST(Hysteresis, WeakPixelConnectedToStrongIsKept) {
+    uint8_t nms[9] = {0, 75, 0, 0, 200, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[1], 255); // weak promoted
+    EXPECT_EQ(out[4], 255); // strong kept
+}
+
+// A weak pixel (75, between low and high) with no strong neighbor
+// anywhere nearby must be suppressed to 0 -- being "weak" alone isn't
+// enough to survive; it needs a connection to a strong edge.
+TEST(Hysteresis, IsolatedWeakPixelSuppressed) {
+    uint8_t nms[9] = {0, 0, 0, 0, 75, 0, 0, 0, 0};
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    EXPECT_EQ(out[4], 0);
+}
+
+// Every pixel is set to 20, below the low threshold (50) -- none of
+// these qualify as even "weak," so the entire output must be zero
+// regardless of any connectivity.
+TEST(Hysteresis, BelowLowThresholdAlwaysSuppressed) {
+    uint8_t nms[9];
+    std::memset(nms, 20, 9); // all below low=50
+    uint8_t out[9] = {};
+    hysteresis_threshold(nms, out, 3, 3, 50, 100);
+    for (int i = 0; i < 9; i++) EXPECT_EQ(out[i], 0);
+}
+
+// The defining contract of hysteresis: the output is strictly BINARY.
+// Every pixel must end up as exactly 0 or exactly 255 -- no partial or
+// intermediate values are allowed to survive, even though the input
+// (nms[]) contains a full gradient of values from 0 to 240.
+TEST(Hysteresis, OutputOnlyContains0Or255) {
+    uint8_t nms[25];
+    for (int i = 0; i < 25; i++) nms[i] = (uint8_t)(i * 10);
+    uint8_t out[25] = {};
+    hysteresis_threshold(nms, out, 5, 5, 60, 120);
+    for (int i = 0; i < 25; i++)
+        EXPECT_TRUE(out[i] == 0 || out[i] == 255);
 }
 
 // Standard GoogleTest entry point: parses command-line filters (e.g.

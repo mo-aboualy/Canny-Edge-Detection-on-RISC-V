@@ -21,22 +21,23 @@ This README is written to serve as both a build guide and the **presentation ref
 4. [Build Targets](#build-targets)
 5. [Repository Structure](#repository-structure)
 6. [Image Format](#image-format)
-7. [Measurement Methodology](#measurement-methodology)
-8. [Phase 4 — Compiler Optimization Sweep](#phase-4--compiler-optimization-sweep)
-9. [Phase 5 — Profiling & Hotspot Identification](#phase-5--profiling--hotspot-identification)
-10. [Phase 6 — RVV Intrinsic Optimization](#phase-6--rvv-intrinsic-optimization)
-11. [Master Optimization Table](#master-optimization-table)
-12. [Conclusions](#conclusions)
-13. [Team Roles](#team-roles)
-14. [Git Workflow](#git-workflow)
+7. [Full Pipeline Output (Including Bonus Stages)](#full-pipeline-output-including-bonus-stages)
+8. [Measurement Methodology](#measurement-methodology)
+9. [Phase 4 — Compiler Optimization Sweep](#phase-4--compiler-optimization-sweep)
+10. [Phase 5 — Profiling & Hotspot Identification](#phase-5--profiling--hotspot-identification)
+11. [Phase 6 — RVV Intrinsic Optimization](#phase-6--rvv-intrinsic-optimization)
+12. [Master Optimization Table](#master-optimization-table)
+13. [Conclusions](#conclusions)
+14. [Team Roles](#team-roles)
+15. [Git Workflow](#git-workflow)
 
 ---
 
 ## Project Overview
 
-This project implements a Canny edge detection pipeline — Gaussian blur → Sobel gradient → gradient magnitude → gradient direction — in clean scalar C++, then systematically optimizes it: first via compiler flags, then by profiling for hotspots, then by hand-writing RISC-V Vector (RVV) intrinsics for the hottest stages. Every optimized kernel is verified bit-exact against the scalar baseline before its performance is trusted, and every RVV kernel is verified at **VLEN = 128, 256, and 512** to confirm it is genuinely vector-length-agnostic (VLA) rather than accidentally tuned to one hardware width.
+This project implements a Canny edge detection pipeline — Gaussian blur → Sobel gradient → gradient magnitude → gradient direction → non-maximum suppression → hysteresis thresholding — in clean scalar C++, then systematically optimizes it: first via compiler flags, then by profiling for hotspots, then by hand-writing RISC-V Vector (RVV) intrinsics for the hottest stages. Every optimized kernel is verified bit-exact against the scalar baseline before its performance is trusted, and every RVV kernel is verified at **VLEN = 128, 256, and 512** to confirm it is genuinely vector-length-agnostic (VLA) rather than accidentally tuned to one hardware width.
 
-The minimum deliverable is Gaussian blur + Sobel gradient (including magnitude and direction). The full optimization journey — compiler sweep, profiling, and hand RVV — is the actual point of the project, not just a working pipeline.
+The minimum deliverable was Gaussian blur + Sobel gradient (including magnitude and direction). The team completed the full five-stage Canny algorithm, adding non-maximum suppression and hysteresis thresholding as bonus stages (see [Full Pipeline Output](#full-pipeline-output-including-bonus-stages)). The full optimization journey — compiler sweep, profiling, and hand RVV — remains the core focus of the project, not just a working pipeline.
 
 ---
 
@@ -269,7 +270,26 @@ make visualize_rv     # RISC-V/QEMU build, swept across VLEN 128/256/512
 
 ---
 
-## Measurement Methodology
+## Full Pipeline Output (Including Bonus Stages)
+
+The image below shows every stage of the pipeline running end-to-end on a real 512×512 test photo, generated via `make visualize` (host build):
+
+![Canny pipeline stages — input through final edges](readmepics/pipeline_stages.jpeg)
+
+| # | Stage | Status |
+|---|---|---|
+| 1 | Input | Required |
+| 2 | Gaussian Blur | Required |
+| 3 | Sobel Gx | Required |
+| 4 | Sobel Gy | Required |
+| 5 | Magnitude | Required |
+| 6 | Direction (color-coded) | Required |
+| 7 | Non-Max Suppression | **Bonus** |
+| 8 | Hysteresis (final edges) | **Bonus** |
+
+**Conclusion — bonus stages completed.** The project's minimum deliverable was Gaussian blur and Sobel gradient computation (stages 1–6 above). The team went beyond this and implemented the full Canny algorithm through **non-maximum suppression** (thinning the raw gradient magnitude down to single-pixel-wide ridges, stage 7) and **hysteresis thresholding** (classifying and tracing edges by strength to produce the final clean binary edge map, stage 8) — satisfying the rubric's bonus criterion ("Implement non-maximum suppression and/or thresholding stages beyond the minimum Sobel requirement"). The progression from the noisy raw magnitude map (stage 5) to the thinned, clean silhouette in the final hysteresis output (stage 8) is the clearest single piece of visual evidence that the full algorithm — not just the required subset — is implemented and working correctly.
+
+---
 
 QEMU user-mode is **not cycle-accurate**. It does not model a real RISC-V microarchitecture's pipeline, caches, or branch predictor — it interprets (or JIT-translates) each instruction at a roughly constant emulation cost. This has two consequences for how every number in this README should be read:
 
@@ -473,9 +493,9 @@ The guide predicts a non-monotonic curve: LMUL=2 should beat LMUL=1 (more elemen
 
 | VLEN | LMUL=1 | LMUL=2 | LMUL=4 |
 |---|---|---|---|
-| 128 | 94,473,678 ns | 58,392,379 ns | 59,359,753 ns |
-| 256 | 57,461,010 ns | 44,477,902 ns | 44,194,454 ns |
-| 512 | 42,180,654 ns | 36,433,509 ns | 36,848,082 ns |
+| 128 | 94.47 ms | 58.39 ms | 59.36 ms |
+| 256 | 57.46 ms | 44.48 ms | 44.19 ms |
+| 512 | 42.18 ms | 36.43 ms | 36.85 ms |
 
 **Correctness:** all three LMUL settings produced `max|diff| = 0` against the scalar spatial-2D reference at every VLEN tested — register grouping changes performance, never numerical results, as expected.
 

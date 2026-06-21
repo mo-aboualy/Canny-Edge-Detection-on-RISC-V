@@ -1,11 +1,18 @@
 /**
  * @file Test_sobel.cpp
  * @brief Phase 2.3 Verification: Applies Sobel Gradient to a blurred raw image.
- * 
+ *
  * Usage: ./test_sobel <input.raw> <output_magnitude.raw> <width> <height>
- * 
+ *
  * Example:
  *   ./test_sobel Tool/test_blurred.raw Tool/test_magnitude.raw 512 512
+ *
+ * Like Test_blur.cpp, this is a MANUAL/VISUAL check. It takes the output
+ * of the Gaussian blur stage (a smoothed image) and runs it through the
+ * real Sobel implementation, saving the gradient magnitude as a viewable
+ * image. A correctly working Sobel stage should produce an image that
+ * looks like a black background with bright white outlines tracing the
+ * edges of objects in the original photo.
  */
 
 #include "image_io.h"
@@ -18,6 +25,11 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     // 1. PARSE ARGUMENTS
     // ─────────────────────────────────────────────
+    // All arguments optional with defaults pointing at the standard
+    // Tool/ folder paths, so the typical workflow is:
+    //   1) Tool/prepare_image.py  -> creates input_512.raw
+    //   2) Test_blur              -> creates the blurred image
+    //   3) Test_sobel              -> creates the final edge-magnitude image
     const char* input_file  = (argc > 1) ? argv[1] : "Tool/test_blurred.raw";
     const char* output_file = (argc > 2) ? argv[2] : "Tool/test_magnitude.raw";
     const uint32_t width    = (argc > 3) ? (uint32_t)std::atoi(argv[3]) : 512;
@@ -34,6 +46,10 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     // 2. LOAD INPUT (blurred image)
     // ─────────────────────────────────────────────
+    // Sobel is meant to run AFTER Gaussian blur in the pipeline -- blurring
+    // first reduces noise so Sobel doesn't pick up false edges from
+    // sensor/compression noise. This is why the default input file name
+    // assumes it's reading the blur stage's output, not the raw photo.
     Image input_img;
 
     if (!image_read(input_file, width, height, input_img)) {
@@ -49,7 +65,12 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     GradientImage gradient;
 
-    // Note: sobel_3x3 allocates gx, gy, and magnitude internally
+    // Note: sobel_3x3 allocates gx, gy, and magnitude internally.
+    // Unlike gaussian_blur_5x5() (where the caller pre-allocates the
+    // output buffer), sobel_3x3() owns its own output allocation -- the
+    // caller only needs to set width/height and initialize the pointers
+    // to nullptr before the call (good practice, even though sobel_3x3
+    // overwrites them).
     gradient.gx        = nullptr;
     gradient.gy        = nullptr;
     gradient.magnitude = nullptr;
@@ -59,6 +80,9 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     // 4. EXECUTE SOBEL
     // ─────────────────────────────────────────────
+    // This is the real scalar baseline implementation -- the same function
+    // tested for correctness in host_tests.cpp (vertical/horizontal edge
+    // detection, zero gradient on uniform images, zeroed borders).
     std::cout << "Step 2: Applying Sobel 3x3 gradient..." << std::endl;
 
     sobel_3x3(input_img, gradient);
@@ -68,7 +92,11 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     // 5. SAVE MAGNITUDE AS RAW (uint16_t → uint8_t)
     // ─────────────────────────────────────────────
-    // magnitude is already clamped to [0, 255] so safe to cast
+    // magnitude is already clamped to [0, 255] so safe to cast.
+    // GradientImage.magnitude is stored as uint16_t internally (gradient
+    // values before normalization can briefly exceed 255), but by the time
+    // sobel_3x3() returns, it has already been normalized/clamped into the
+    // [0,255] range -- so truncating to uint8_t here loses no information.
     Image magnitude_img;
     magnitude_img.width  = width;
     magnitude_img.height = height;
@@ -97,6 +125,11 @@ int main(int argc, char* argv[]) {
     // ─────────────────────────────────────────────
     // 6. CLEANUP
     // ─────────────────────────────────────────────
+    // gradient_free() is required (not just image_free()) because
+    // GradientImage owns three separate internally-allocated buffers
+    // (gx, gy, magnitude), all of which need releasing -- a plain
+    // image_free() wouldn't know about them since it only operates
+    // on the simpler Image struct.
     gradient_free(gradient);
     image_free(input_img);
     image_free(magnitude_img);

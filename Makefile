@@ -113,7 +113,7 @@ $(BUILD_DIR_HOST)/test_runner: $(TEST_SRCS) | $(BUILD_DIR_HOST)
 # $@ = the target itself (build/host/test_runner)
 
 test: $(BUILD_DIR_HOST)/test_runner
-> @./$
+> @./$<
 # $< = the FIRST prerequisite only (here, just the test_runner binary) — i.e. "run what was just built"
 
 # ============================================================================

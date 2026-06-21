@@ -47,15 +47,25 @@ BUILD_DIR_VIZ := build/viz
 # the file via $(PIPELINE_SRCS) so every recipe stays in sync automatically.
 PIPELINE_SRCS := \
     src/image_io.cpp \
+    # provides Image struct + raw image read/write helpers
     src/gaussian_blur.cpp \
+    # the team's scalar Gaussian blur implementations (spatial + separable)
     src/gaussian_rvv.cpp \
+    # the manually-written RVV intrinsic version of Gaussian blur
     src/sobel.cpp \
+    # the scalar Sobel 3x3 gradient implementation
     src/sobel_rvv.cpp \
+    # the manually-written RVV intrinsic version of Sobel
     src/magnitude.cpp \
+    # scalar L1/L2 gradient magnitude implementations
     src/magnitude_rvv.cpp \
+    # manually-written RVV intrinsic version of magnitude computation
     src/direction.cpp \
+    # scalar gradient direction quantization implementation
     src/nms.cpp \
     src/hysteresis.cpp
+# this single list is reused by EVERY build rule below — adding a new pipeline
+# stage means adding ONE line here, and it's automatically included everywhere
 
 # .PHONY declares these as "command names", not real files to be produced.
 # Without this, if a file literally named "pipeline_stages" ever existed,
@@ -79,7 +89,11 @@ pipeline_stages: | $(BUILD_DIR_HOST)
 
 # --- Phase 4 setup ---
 PHASE4_SRC := Test/benchmark.cpp
+# the single file defining WHAT gets measured in the Phase 4 sweep;
+# changing this path would change the entire benchmark's behavior
 VEC_REPORT := $(BUILD_DIR_P4)/vec_report.txt
+# the output file path where the vectorization analysis report gets written,
+# built by combining the build directory variable with a fixed filename
 
 # Master .PHONY list for every command-style target defined below.
 .PHONY: all test canny_rv run clean \
@@ -123,72 +137,108 @@ test: $(BUILD_DIR_HOST)/test_runner
 # ============================================================================
 
 $(BUILD_DIR_P4)/bench_O0: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
+# target (before colon): the binary this rule produces
+# prerequisites (after colon): the source files needed to build it
+# | $(BUILD_DIR_P4): order-only prerequisite, just ensures the output folder exists first
 > @echo "[BUILD] RV Benchmark O0"
+# @ suppresses Make from echoing the command itself; prints a friendly status message instead
 > @$(RV_CXX) -O0 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# -O0 = no optimization at all (baseline)
+# -O0: NO optimization at all — the baseline, slowest build
+# $^: Make shorthand for "all prerequisites" (benchmark.cpp + every pipeline source)
+# -o $@: -o means "output file", $@ means "this rule's target" (bench_O0)
+# $(RV_LIBS): links the math library (-lm), needed for sqrt() in Magnitude L2
+
 
 $(BUILD_DIR_P4)/bench_O2: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
 > @echo "[BUILD] RV Benchmark O2"
 > @$(RV_CXX) -O2 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# -O2 = standard "release" optimization level
+# -O2: safe, common optimizations (inlining, dead code removal, register allocation)
+# everything else identical in structure to the O0 rule above
+
 
 $(BUILD_DIR_P4)/bench_O3: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
 > @echo "[BUILD] RV Benchmark O3"
 > @$(RV_CXX) -O3 $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# -O3 = aggressive optimization, including auto-vectorization attempts
+# -O3: aggressive optimizations — adds loop unrolling and more inlining on top of O2
+
 
 $(BUILD_DIR_P4)/bench_Os: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
 > @echo "[BUILD] RV Benchmark Os"
 > @$(RV_CXX) -Os $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# -Os = optimize for smallest binary size, not speed
+# -Os: optimizes for SMALLEST binary size rather than maximum speed
+
 
 $(BUILD_DIR_P4)/bench_Ofast: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
 > @echo "[BUILD] RV Benchmark Ofast"
 > @$(RV_CXX) -Ofast $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# -Ofast = -O3 plus relaxed floating-point rules (-ffast-math) — faster sqrt() etc., at the cost of strict IEEE correctness
+# -Ofast: O3 plus relaxed floating-point rules (-ffast-math); can be faster but
+#         less numerically precise, especially noticeable for the sqrt() in Magnitude L2
+
 
 $(BUILD_DIR_P4)/bench_O3_vec: $(PHASE4_SRC) $(PIPELINE_SRCS) | $(BUILD_DIR_P4)
 > @echo "[BUILD] RV Benchmark O3_vec"
 > @$(RV_CXX) -O3 -ftree-vectorize -fopt-info-vec-all=$(VEC_REPORT) $(RV_FLAGS) $^ -o $@ $(RV_LIBS)
-# Same as -O3, but additionally asks GCC to write a report (to VEC_REPORT)
-# explaining which loops it successfully auto-vectorized and which it
-# couldn't, and why. Used to justify which kernels need hand-written RVV in Phase 6.
+# -O3: same aggressive optimization base as the O3 rule above
+# -ftree-vectorize: explicitly enables GCC's auto-vectorization pass
+# -fopt-info-vec-all=$(VEC_REPORT): writes a detailed report of every vectorization
+#         decision (success or failure, with the reason) to the path stored in VEC_REPORT
 
-# Convenience target: building this alone triggers all six binaries above.
+
 phase4_build: $(BUILD_DIR_P4)/bench_O0 $(BUILD_DIR_P4)/bench_O2 \
                $(BUILD_DIR_P4)/bench_O3 $(BUILD_DIR_P4)/bench_Os \
                $(BUILD_DIR_P4)/bench_Ofast $(BUILD_DIR_P4)/bench_O3_vec
+# Convenience target: building this alone triggers all six binaries above.
+# a target with NO commands of its own — just a list of the 6 binaries as dependencies
+# running "make phase4_build" builds whichever of these don't already exist or are outdated
 
-# Runs each of the six binaries under QEMU in turn, printing a labeled
-# header before each — this is what produces the Phase 4 timing table.
+
 phase4_sweep: phase4_build
+# depends on phase4_build first, ensuring all 6 binaries exist before trying to run any of them
 > @for opt in O0 O2 O3 Os Ofast O3_vec; do \
 >   echo "\n--- [ -$$opt ] ---"; \
 >   $(QEMU) -cpu rv64,v=true,vlen=$(VLEN) $(BUILD_DIR_P4)/bench_$$opt; \
 > done
-# Note: '$$opt' (double dollar sign) is needed because this loop runs
-# inside the shell, not inside Make itself — a single '$' would be
-# interpreted by Make instead of bash.
+# for opt in ...: bash loop iterating over the 6 optimization-level names
+# echo "--- [-$$opt] ---": prints a clear header before each binary's output
+#   ($$ is needed because a single $ would be consumed by Make itself, not passed to bash)
+# $(QEMU) -cpu rv64,v=true,vlen=$(VLEN): runs the binary under QEMU emulation
+#   v=true: enables RVV (Vector extension) emulation
+#   vlen=$(VLEN): sets the emulated vector register width (defaults to 128, set at file top)
+#   $(BUILD_DIR_P4)/bench_$$opt: the specific binary being run this iteration
 
-# Reports the on-disk size (in bytes) of each of the six binaries —
-# this is what produces the Phase 4 binary-size table.
+
 phase4_sizes: phase4_build
 > @echo "\n--- Binary Sizes ---"
 > @for opt in O0 O2 O3 Os Ofast O3_vec; do \
 >   stat -c "%s bytes : $$opt" $(BUILD_DIR_P4)/bench_$$opt; \
 > done
+# Reports the on-disk size (in bytes) of each of the six binaries —
+# this is what produces the Phase 4 binary-size table.
+# same loop structure as phase4_sweep, but instead of running each binary,
+# 'stat -c "%s ..."' prints its file size in bytes (stat's %s = size, not printf's %s = string)
 
+
+
+phase4_vec_count: $(BUILD_DIR_P4)/bench_O3_vec
+# depends only on the O3_vec binary specifically, since that's the only one built
+# with the vectorization report flag
+> @echo "\n--- Vector Configs (vsetvli) ---"
+> @$(OBJDUMP) -d $< | grep -E "vset[i]?vli" | wc -l
 # Disassembles the -O3_vec binary and counts how many "vsetvli"/"vsetivli"
 # instructions appear — each one marks a point where the compiler
 # successfully configured a vector operation. This is the
 # "Total vector configuration instructions: 170" figure in the README.
-phase4_vec_count: $(BUILD_DIR_P4)/bench_O3_vec
-> @echo "\n--- Vector Configs (vsetvli) ---"
-> @$(OBJDUMP) -d $< | grep -E "vset[i]?vli" | wc -l
-# $< = first prerequisite (the bench_O3_vec binary)
+# $(OBJDUMP) -d $<: disassembles the binary into readable assembly
+#   $< = Make shorthand for "the first prerequisite" (here, just bench_O3_vec)
+# grep -E "vset[i]?vli": searches for either "vsetvli" or "vsetivli" instruction names
+#   [i]? means "the letter i, optionally present" — matches both RVV variants
+# wc -l: counts how many matching lines were found, giving a single number
 
-# Running `make phase4` alone triggers all three Phase 4 sub-targets in order.
+
 phase4: phase4_sweep phase4_sizes phase4_vec_count
+# top-level shortcut target with no commands of its own — running "make phase4"
+# triggers all three sub-targets (timing, sizes, vector count) in one command
+
 
 # ============================================================================
 # --- Phase 5: Profiling and Hotspot Identification ---
